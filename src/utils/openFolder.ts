@@ -1,4 +1,6 @@
+import { invoke } from "@tauri-apps/api/core";
 import type { FileEntry } from "../store/useIdeStore";
+import { inTauri } from "./tauriEnv";
 
 const MAX_FILES = 200;
 const MAX_FILE_BYTES = 512 * 1024;
@@ -49,6 +51,27 @@ function isTextLikely(name: string): boolean {
 export interface OpenedFolder {
   rootName: string;
   files: Record<string, FileEntry>;
+  rootPath?: string | null;
+}
+
+interface TauriLoadedFolder {
+  rootName: string;
+  rootPath: string;
+  files: Record<string, FileEntry>;
+}
+
+export function isTauriFolderPickerAvailable(): boolean {
+  return inTauri();
+}
+
+export async function openFolderFromTauri(): Promise<OpenedFolder | null> {
+  const result = await invoke<TauriLoadedFolder | null>("pick_and_load_folder");
+  if (!result) return null;
+  return {
+    rootName: result.rootName,
+    rootPath: result.rootPath,
+    files: result.files,
+  };
 }
 
 export function isOpenFolderSupported(): boolean {

@@ -1,5 +1,6 @@
 mod pty;
 mod startup;
+mod workspace;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -21,6 +22,7 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            workspace::pick_and_load_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { isOpenFolderSupported, openFolderFromBrowser } from "./openFolder";
+import {
+  isOpenFolderSupported,
+  openFolderFromBrowser,
+  openFolderFromTauri,
+} from "./openFolder";
+import { invoke } from "@tauri-apps/api/core";
 
 function fileHandle(name: string, content: string) {
   return {
@@ -74,5 +79,35 @@ describe("openFolder", () => {
     }).showDirectoryPicker = vi.fn().mockRejectedValue(abort);
     const result = await openFolderFromBrowser();
     expect(result).toBeNull();
+  });
+});
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+}));
+
+describe("openFolderFromTauri", () => {
+  it("invokes pick_and_load_folder and normalizes the payload", async () => {
+    (invoke as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      rootName: "proj",
+      rootPath: "/Users/me/proj",
+      files: {
+        "proj/README.md": { path: "proj/README.md", language: "markdown", content: "# p" },
+      },
+    });
+    const result = await openFolderFromTauri();
+    expect(invoke).toHaveBeenCalledWith("pick_and_load_folder");
+    expect(result).toEqual({
+      rootName: "proj",
+      rootPath: "/Users/me/proj",
+      files: {
+        "proj/README.md": { path: "proj/README.md", language: "markdown", content: "# p" },
+      },
+    });
+  });
+
+  it("returns null when the picker is cancelled", async () => {
+    (invoke as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    expect(await openFolderFromTauri()).toBeNull();
   });
 });
