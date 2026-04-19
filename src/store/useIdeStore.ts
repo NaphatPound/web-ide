@@ -8,6 +8,7 @@ export interface FileEntry {
   path: string;
   language: string;
   content: string;
+  dirty?: boolean;
 }
 
 export interface TerminalEntry {
@@ -22,6 +23,7 @@ interface IdeState {
   mode: Mode;
   files: Record<string, FileEntry>;
   activeFile: string | null;
+  openFiles: string[];
   rootName: string | null;
   rootPath: string | null;
   terminals: TerminalEntry[];
@@ -31,7 +33,9 @@ interface IdeState {
   toggleMode: () => void;
   addFile: (file: FileEntry) => void;
   openFile: (path: string) => void;
+  closeFile: (path: string) => void;
   updateFile: (path: string, content: string) => void;
+  markFileSaved: (path: string) => void;
   loadFolder: (
     rootName: string,
     files: Record<string, FileEntry>,
@@ -61,6 +65,7 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   mode: "vs_code",
   files: seedFiles,
   activeFile: "src/index.tsx",
+  openFiles: ["src/index.tsx"],
   rootName: null,
   rootPath: null,
   terminals: [{ id: "t1", title: "Term 1" }],
@@ -76,21 +81,52 @@ export const useIdeStore = create<IdeState>((set, get) => ({
 
   openFile: (path) => {
     if (!get().files[path]) return;
-    set({ activeFile: path });
+    set((s) => ({
+      activeFile: path,
+      openFiles: s.openFiles.includes(path) ? s.openFiles : [...s.openFiles, path],
+    }));
   },
+
+  closeFile: (path) =>
+    set((s) => {
+      const idx = s.openFiles.indexOf(path);
+      if (idx === -1) return s;
+      const openFiles = s.openFiles.filter((p) => p !== path);
+      let activeFile = s.activeFile;
+      if (activeFile === path) {
+        activeFile = openFiles[Math.min(idx, openFiles.length - 1)] ?? null;
+      }
+      return { openFiles, activeFile };
+    }),
 
   updateFile: (path, content) =>
     set((s) => {
       const existing = s.files[path];
       if (!existing) return s;
+      if (existing.content === content && !!existing.dirty === false) return s;
       return {
-        files: { ...s.files, [path]: { ...existing, content } },
+        files: { ...s.files, [path]: { ...existing, content, dirty: true } },
+      };
+    }),
+
+  markFileSaved: (path) =>
+    set((s) => {
+      const existing = s.files[path];
+      if (!existing || !existing.dirty) return s;
+      return {
+        files: { ...s.files, [path]: { ...existing, dirty: false } },
       };
     }),
 
   loadFolder: (rootName, files, rootPath = null) => {
     const first = Object.keys(files)[0] ?? null;
-    set({ rootName, rootPath, files, activeFile: first });
+    set({
+      rootName,
+      rootPath,
+      files,
+      activeFile: first,
+      openFiles: first ? [first] : [],
+    });
   },
 
   addTerminal: (title, initialCmd) => {

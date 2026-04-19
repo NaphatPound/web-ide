@@ -6,7 +6,22 @@ describe("useIdeStore", () => {
     useIdeStore.setState({
       mode: "vs_code",
       activeFile: "src/index.tsx",
+      openFiles: ["src/index.tsx"],
       terminals: [{ id: "t1", title: "Term 1" }],
+      rootName: null,
+      rootPath: null,
+      files: {
+        "src/index.tsx": {
+          path: "src/index.tsx",
+          language: "typescript",
+          content: "// seed\n",
+        },
+        "README.md": {
+          path: "README.md",
+          language: "markdown",
+          content: "# Welcome\n",
+        },
+      },
     });
   });
 
@@ -75,5 +90,50 @@ describe("useIdeStore", () => {
     const id = useIdeStore.getState().addTerminal("Scripts", "npm run build");
     const entry = useIdeStore.getState().terminals.find((t) => t.id === id);
     expect(entry?.initialCmd).toBe("npm run build");
+  });
+
+  it("openFile adds to openFiles when not already open", () => {
+    useIdeStore.getState().openFile("README.md");
+    const s = useIdeStore.getState();
+    expect(s.openFiles).toEqual(["src/index.tsx", "README.md"]);
+    expect(s.activeFile).toBe("README.md");
+  });
+
+  it("openFile does not duplicate already-open files", () => {
+    useIdeStore.getState().openFile("README.md");
+    useIdeStore.getState().openFile("src/index.tsx");
+    expect(useIdeStore.getState().openFiles).toEqual(["src/index.tsx", "README.md"]);
+  });
+
+  it("closeFile removes from openFiles and selects a neighbour", () => {
+    useIdeStore.getState().openFile("README.md");
+    useIdeStore.getState().closeFile("src/index.tsx");
+    const s = useIdeStore.getState();
+    expect(s.openFiles).toEqual(["README.md"]);
+    expect(s.activeFile).toBe("README.md");
+  });
+
+  it("closeFile clears activeFile when last tab is closed", () => {
+    useIdeStore.getState().closeFile("src/index.tsx");
+    const s = useIdeStore.getState();
+    expect(s.openFiles).toEqual([]);
+    expect(s.activeFile).toBeNull();
+  });
+
+  it("updateFile marks the file dirty; markFileSaved clears it", () => {
+    useIdeStore.getState().updateFile("README.md", "# edited");
+    expect(useIdeStore.getState().files["README.md"].dirty).toBe(true);
+    useIdeStore.getState().markFileSaved("README.md");
+    expect(useIdeStore.getState().files["README.md"].dirty).toBe(false);
+  });
+
+  it("loadFolder resets openFiles to just the first file", () => {
+    useIdeStore.getState().loadFolder("proj", {
+      "proj/a": { path: "proj/a", language: "plaintext", content: "" },
+      "proj/b": { path: "proj/b", language: "plaintext", content: "" },
+    });
+    const s = useIdeStore.getState();
+    expect(s.openFiles).toEqual(["proj/a"]);
+    expect(s.activeFile).toBe("proj/a");
   });
 });

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { promises as fs } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, resolve } from "node:path";
 import type { Connect, Plugin, ViteDevServer, PreviewServer } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
@@ -380,6 +380,40 @@ function attach(middlewares: Connect.Server): void {
         try {
           pty.resize(Math.max(10, body.cols), Math.max(5, body.rows));
           sendJson(res, 200, { ok: true });
+        } catch (err) {
+          sendJson(res, 500, { error: (err as Error).message });
+        }
+      },
+      (err: Error) => sendJson(res, 400, { error: err.message })
+    );
+  });
+
+  middlewares.use("/__writeFile", (req, res) => {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method not allowed" });
+      return;
+    }
+    readJsonBody<{ rootPath?: string; relPath?: string; content?: string }>(req).then(
+      async (body) => {
+        if (
+          !body.rootPath ||
+          !body.relPath ||
+          typeof body.content !== "string"
+        ) {
+          sendJson(res, 400, { error: "missing rootPath/relPath/content" });
+          return;
+        }
+        const root = resolve(body.rootPath);
+        const target = resolve(root, body.relPath);
+        const withSep = root.endsWith("/") ? root : root + "/";
+        if (target !== root && !target.startsWith(withSep)) {
+          sendJson(res, 403, { error: "path escapes workspace root" });
+          return;
+        }
+        try {
+          await fs.mkdir(join(target, ".."), { recursive: true });
+          await fs.writeFile(target, body.content, "utf8");
+          sendJson(res, 200, { ok: true, path: target });
         } catch (err) {
           sendJson(res, 500, { error: (err as Error).message });
         }

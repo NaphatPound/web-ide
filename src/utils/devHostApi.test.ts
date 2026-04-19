@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { runExec, sendExecInput, sendExecResize, type ExecEvent } from "./devHostApi";
+import {
+  runExec,
+  sendExecInput,
+  sendExecResize,
+  writeFileToHost,
+  type ExecEvent,
+} from "./devHostApi";
 
 function streamingResponse(lines: string[]): Response {
   const encoder = new TextEncoder();
@@ -91,5 +97,32 @@ describe("sendExecInput / sendExecResize", () => {
         body: JSON.stringify({ id: "abc-123", cols: 120, rows: 30 }),
       })
     );
+  });
+});
+
+describe("writeFileToHost", () => {
+  it("POSTs rootPath/relPath/content and resolves on 200", async () => {
+    const spy = vi
+      .spyOn(global, "fetch")
+      .mockResolvedValue(new Response('{"ok":true}', { status: 200 }));
+    await writeFileToHost("/Users/me/proj", "src/a.ts", "export const x = 1\n");
+    expect(spy).toHaveBeenCalledWith(
+      "/__writeFile",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          rootPath: "/Users/me/proj",
+          relPath: "src/a.ts",
+          content: "export const x = 1\n",
+        }),
+      })
+    );
+  });
+
+  it("throws a descriptive error on non-2xx", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response('{"error":"path escapes workspace root"}', { status: 403 })
+    );
+    await expect(writeFileToHost("/a", "b", "x")).rejects.toThrow(/escapes/);
   });
 });

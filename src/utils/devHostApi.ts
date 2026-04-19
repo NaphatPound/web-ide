@@ -72,6 +72,22 @@ export async function sendExecResize(id: string, cols: number, rows: number): Pr
   }).catch(() => {});
 }
 
+export async function writeFileToHost(
+  rootPath: string,
+  relPath: string,
+  content: string
+): Promise<void> {
+  const res = await fetch("/__writeFile", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ rootPath, relPath, content }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+}
+
 export async function runExec(
   cwd: string | null,
   cmd: string,
