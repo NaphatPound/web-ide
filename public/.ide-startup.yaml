@@ -1,0 +1,13 @@
+startup:
+  - action: open_files
+    files:
+      - "src/index.tsx"
+      - "README.md"
+  - action: set_mode
+    mode: vs_code
+  - action: run_terminal
+    commands:
+      - title: "Frontend"
+        cmd: "npm run dev"
+      - title: "Agent"
+        cmd: "claude code"

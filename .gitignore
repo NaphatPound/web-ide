@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Tooling caches
+.rtk/
+.vite/
+.turbo/
+.cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
