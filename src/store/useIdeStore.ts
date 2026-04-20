@@ -19,6 +19,62 @@ export interface TerminalEntry {
   initialAutoEnter?: { count: number; intervalMs: number };
 }
 
+export interface ShortcutEntry {
+  id: string;
+  name: string;
+  command: string;
+}
+
+const SHORTCUTS_STORAGE_KEY = "web-ide:shortcuts";
+
+const DEFAULT_SHORTCUTS: ShortcutEntry[] = [
+  { id: "s-ls", name: "ls", command: "ls -la" },
+  { id: "s-git-status", name: "git status", command: "git status" },
+  { id: "s-clear", name: "clear", command: "clear" },
+];
+
+function loadShortcuts(): ShortcutEntry[] {
+  if (typeof window === "undefined") return DEFAULT_SHORTCUTS.map((s) => ({ ...s }));
+  try {
+    const raw = window.localStorage?.getItem(SHORTCUTS_STORAGE_KEY);
+    if (!raw) return DEFAULT_SHORTCUTS.map((s) => ({ ...s }));
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return DEFAULT_SHORTCUTS.map((s) => ({ ...s }));
+    return parsed.filter(
+      (s): s is ShortcutEntry =>
+        typeof s === "object" &&
+        s !== null &&
+        typeof (s as { id?: unknown }).id === "string" &&
+        typeof (s as { name?: unknown }).name === "string" &&
+        typeof (s as { command?: unknown }).command === "string"
+    );
+  } catch {
+    return DEFAULT_SHORTCUTS.map((s) => ({ ...s }));
+  }
+}
+
+function saveShortcuts(shortcuts: ShortcutEntry[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage?.setItem(
+      SHORTCUTS_STORAGE_KEY,
+      JSON.stringify(shortcuts)
+    );
+  } catch {
+    // ignore storage errors (private mode / quota)
+  }
+}
+
+function newShortcutId(): string {
+  try {
+    const g = globalThis as unknown as { crypto?: { randomUUID?: () => string } };
+    if (g.crypto?.randomUUID) return `s-${g.crypto.randomUUID()}`;
+  } catch {
+    // fall through
+  }
+  return `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 interface IdeState {
   mode: Mode;
   files: Record<string, FileEntry>;
@@ -27,8 +83,10 @@ interface IdeState {
   rootName: string | null;
   rootPath: string | null;
   terminals: TerminalEntry[];
+  activeTerminalId: string | null;
   preferredLayout: TerminalLayout;
   layoutVersion: number;
+  shortcuts: ShortcutEntry[];
   setMode: (mode: Mode) => void;
   toggleMode: () => void;
   addFile: (file: FileEntry) => void;
@@ -43,7 +101,14 @@ interface IdeState {
   ) => void;
   addTerminal: (title: string, initialCmd?: string) => string;
   removeTerminal: (id: string) => void;
+  setActiveTerminalId: (id: string | null) => void;
   startAiTerminals: () => void;
+  addShortcut: (name: string, command: string) => string;
+  updateShortcut: (
+    id: string,
+    updates: Partial<Omit<ShortcutEntry, "id">>
+  ) => void;
+  removeShortcut: (id: string) => void;
 }
 
 const seedFiles: Record<string, FileEntry> = {
@@ -69,8 +134,10 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   rootName: null,
   rootPath: null,
   terminals: [{ id: "t1", title: "Term 1" }],
+  activeTerminalId: "t1",
   preferredLayout: "tabs",
   layoutVersion: 0,
+  shortcuts: loadShortcuts(),
 
   setMode: (mode) => set({ mode }),
   toggleMode: () =>
@@ -131,12 +198,24 @@ export const useIdeStore = create<IdeState>((set, get) => ({
 
   addTerminal: (title, initialCmd) => {
     const id = `t${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    set((s) => ({ terminals: [...s.terminals, { id, title, initialCmd }] }));
+    set((s) => ({
+      terminals: [...s.terminals, { id, title, initialCmd }],
+      activeTerminalId: id,
+    }));
     return id;
   },
 
   removeTerminal: (id) =>
-    set((s) => ({ terminals: s.terminals.filter((t) => t.id !== id) })),
+    set((s) => {
+      const terminals = s.terminals.filter((t) => t.id !== id);
+      const activeTerminalId =
+        s.activeTerminalId === id
+          ? (terminals[0]?.id ?? null)
+          : s.activeTerminalId;
+      return { terminals, activeTerminalId };
+    }),
+
+  setActiveTerminalId: (id) => set({ activeTerminalId: id }),
 
   startAiTerminals: () => {
     const now = Date.now();
@@ -149,8 +228,35 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     }));
     set((s) => ({
       terminals,
+      activeTerminalId: terminals[0]?.id ?? null,
       preferredLayout: "split",
       layoutVersion: s.layoutVersion + 1,
     }));
   },
+
+  addShortcut: (name, command) => {
+    const id = newShortcutId();
+    set((s) => {
+      const shortcuts = [...s.shortcuts, { id, name, command }];
+      saveShortcuts(shortcuts);
+      return { shortcuts };
+    });
+    return id;
+  },
+
+  updateShortcut: (id, updates) =>
+    set((s) => {
+      const shortcuts = s.shortcuts.map((sc) =>
+        sc.id === id ? { ...sc, ...updates } : sc
+      );
+      saveShortcuts(shortcuts);
+      return { shortcuts };
+    }),
+
+  removeShortcut: (id) =>
+    set((s) => {
+      const shortcuts = s.shortcuts.filter((sc) => sc.id !== id);
+      saveShortcuts(shortcuts);
+      return { shortcuts };
+    }),
 }));

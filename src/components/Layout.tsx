@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "./Sidebar";
 import EditorArea from "./EditorArea";
 import TerminalPanel from "./TerminalPanel";
+import ShortcutBar from "./ShortcutBar";
 import Splitter from "./Splitter";
 import { useIdeStore } from "../store/useIdeStore";
 
@@ -104,7 +105,7 @@ export default function Layout() {
       )}
       <div
         className="grid min-h-0 min-w-0"
-        style={{ gridTemplateRows: `1fr 4px ${terminalH}px` }}
+        style={{ gridTemplateRows: `1fr 4px ${terminalH}px auto` }}
       >
         <EditorArea />
         <Splitter
@@ -114,6 +115,7 @@ export default function Layout() {
           onDragMove={onTerminalDrag}
         />
         <TerminalPanel />
+        <ShortcutBar />
       </div>
     </div>
   );

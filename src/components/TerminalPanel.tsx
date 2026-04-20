@@ -5,20 +5,28 @@ import { useIdeStore } from "../store/useIdeStore";
 type Layout = "tabs" | "split";
 
 export default function TerminalPanel() {
-  const { terminals, addTerminal, removeTerminal, rootName, preferredLayout, layoutVersion } =
-    useIdeStore();
-  const [active, setActive] = useState<string | null>(terminals[0]?.id ?? null);
+  const {
+    terminals,
+    addTerminal,
+    removeTerminal,
+    rootName,
+    preferredLayout,
+    layoutVersion,
+    activeTerminalId,
+    setActiveTerminalId,
+  } = useIdeStore();
+  const active = activeTerminalId;
   const [layout, setLayout] = useState<Layout>(preferredLayout);
 
   useEffect(() => {
     if (terminals.length === 0) {
-      if (active !== null) setActive(null);
+      if (active !== null) setActiveTerminalId(null);
       return;
     }
     if (!active || !terminals.some((t) => t.id === active)) {
-      setActive(terminals[0].id);
+      setActiveTerminalId(terminals[0].id);
     }
-  }, [terminals, active]);
+  }, [terminals, active, setActiveTerminalId]);
 
   useEffect(() => {
     if (terminals.length < 2 && layout === "split") setLayout("tabs");
@@ -30,8 +38,7 @@ export default function TerminalPanel() {
 
   const onAdd = () => {
     const label = rootName ? `${rootName} ${terminals.length + 1}` : `Term ${terminals.length + 1}`;
-    const id = addTerminal(label);
-    setActive(id);
+    addTerminal(label);
   };
 
   const gridCols = useMemo(() => {
@@ -57,7 +64,7 @@ export default function TerminalPanel() {
             }`}
             onClick={() => {
               setLayout("tabs");
-              setActive(t.id);
+              setActiveTerminalId(t.id);
             }}
           >
             <span>{t.title}</span>

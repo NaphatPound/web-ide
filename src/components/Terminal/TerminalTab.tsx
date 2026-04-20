@@ -14,6 +14,7 @@ import {
   sendExecResize,
   type ExecOptions,
 } from "../../utils/devHostApi";
+import { registerTerminalSender } from "../../utils/terminalBus";
 
 interface Props {
   id: string;
@@ -22,6 +23,11 @@ interface Props {
 interface PtyDataEvent {
   id: string;
   data: string;
+}
+
+interface Attachment {
+  cleanup: () => void;
+  send: (text: string) => void;
 }
 
 export default function TerminalTab({ id }: Props) {
@@ -48,24 +54,37 @@ export default function TerminalTab({ id }: Props) {
     const tab = store.getState().terminals.find((t) => t.id === id);
     term.writeln(`\x1b[36m[${tab?.title ?? "term"}] AI Command Center\x1b[0m`);
 
-    let cleanup: () => void;
-    if (inTauri()) {
-      cleanup = attachPty(term, fit, hostRef.current!, tab?.initialCmd ?? null);
-    } else {
-      cleanup = attachDevHostShell(
-        term,
-        fit,
-        hostRef.current!,
-        store,
-        tab?.initialCmd ?? null,
-        {
-          tty: tab?.initialTty,
-          autoEnter: tab?.initialAutoEnter,
-        }
-      );
-    }
+    const markActive = (): void => {
+      if (store.getState().activeTerminalId !== id) {
+        store.getState().setActiveTerminalId(id);
+      }
+    };
+    const hostEl = hostRef.current;
+    hostEl.addEventListener("focusin", markActive);
+    hostEl.addEventListener("mousedown", markActive);
 
-    return cleanup;
+    const attachment: Attachment = inTauri()
+      ? attachPty(term, fit, hostRef.current!, tab?.initialCmd ?? null)
+      : attachDevHostShell(
+          term,
+          fit,
+          hostRef.current!,
+          store,
+          tab?.initialCmd ?? null,
+          {
+            tty: tab?.initialTty,
+            autoEnter: tab?.initialAutoEnter,
+          }
+        );
+
+    const unregisterSender = registerTerminalSender(id, attachment.send);
+
+    return () => {
+      hostEl.removeEventListener("focusin", markActive);
+      hostEl.removeEventListener("mousedown", markActive);
+      unregisterSender();
+      attachment.cleanup();
+    };
   }, [id, store]);
 
   return <div ref={hostRef} className="w-full h-full" />;
@@ -76,7 +95,7 @@ function attachPty(
   fit: FitAddon,
   host: HTMLElement,
   initialCmd: string | null
-): () => void {
+): Attachment {
   let ptyId: string | null = null;
   let unlistenData: UnlistenFn | null = null;
   let unlistenExit: UnlistenFn | null = null;
@@ -121,14 +140,20 @@ function attachPty(
   });
   ro.observe(host);
 
-  return () => {
-    disposed = true;
-    dataDisposable.dispose();
-    ro.disconnect();
-    if (unlistenData) unlistenData();
-    if (unlistenExit) unlistenExit();
-    if (ptyId) invoke("pty_kill", { id: ptyId }).catch(() => {});
-    term.dispose();
+  return {
+    cleanup: () => {
+      disposed = true;
+      dataDisposable.dispose();
+      ro.disconnect();
+      if (unlistenData) unlistenData();
+      if (unlistenExit) unlistenExit();
+      if (ptyId) invoke("pty_kill", { id: ptyId }).catch(() => {});
+      term.dispose();
+    },
+    send: (text: string) => {
+      if (!ptyId) return;
+      invoke("pty_write", { id: ptyId, data: text }).catch(() => {});
+    },
   };
 }
 
@@ -139,7 +164,7 @@ function attachDevHostShell(
   store: typeof useIdeStore,
   initialCmd: string | null,
   initialOptions: ExecOptions = {}
-): () => void {
+): Attachment {
   let buffer = "";
   let running = false;
   let abort: AbortController | null = null;
@@ -225,20 +250,9 @@ function attachDevHostShell(
     prompt();
   }
 
-  const dataDisposable = term.onData((data) => {
-    if (running && ttyMode && activeExecId) {
-      void sendExecInput(activeExecId, data);
-      return;
-    }
-    if (running) {
-      if (data === "\x03") {
-        abort?.abort();
-        term.writeln("^C");
-      }
-      return;
-    }
+  const feedIdleBuffer = (data: string): void => {
     for (const ch of data) {
-      if (ch === "\r") {
+      if (ch === "\r" || ch === "\n") {
         void runLine(buffer);
         buffer = "";
       } else if (ch === "\u007f") {
@@ -257,6 +271,21 @@ function attachDevHostShell(
         term.write(ch);
       }
     }
+  };
+
+  const dataDisposable = term.onData((data) => {
+    if (running && ttyMode && activeExecId) {
+      void sendExecInput(activeExecId, data);
+      return;
+    }
+    if (running) {
+      if (data === "\x03") {
+        abort?.abort();
+        term.writeln("^C");
+      }
+      return;
+    }
+    feedIdleBuffer(data);
   });
 
   const ro = new ResizeObserver(() => {
@@ -267,11 +296,22 @@ function attachDevHostShell(
   });
   ro.observe(host);
 
-  return () => {
-    disposed = true;
-    abort?.abort();
-    dataDisposable.dispose();
-    ro.disconnect();
-    term.dispose();
+  return {
+    cleanup: () => {
+      disposed = true;
+      abort?.abort();
+      dataDisposable.dispose();
+      ro.disconnect();
+      term.dispose();
+    },
+    send: (text: string) => {
+      if (disposed) return;
+      if (running && ttyMode && activeExecId) {
+        void sendExecInput(activeExecId, text);
+        return;
+      }
+      if (running) return;
+      feedIdleBuffer(text);
+    },
   };
 }
