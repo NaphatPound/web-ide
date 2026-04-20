@@ -30,6 +30,19 @@ interface Attachment {
   send: (text: string) => void;
 }
 
+const MIN_COLS = 120;
+
+function applyFit(term: Terminal, fit: FitAddon): void {
+  try {
+    fit.fit();
+  } catch {
+    return;
+  }
+  if (term.cols < MIN_COLS) {
+    term.resize(MIN_COLS, term.rows);
+  }
+}
+
 export default function TerminalTab({ id }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const store = useIdeStore;
@@ -49,7 +62,7 @@ export default function TerminalTab({ id }: Props) {
     term.loadAddon(fit);
     term.loadAddon(links);
     term.open(hostRef.current);
-    fit.fit();
+    applyFit(term, fit);
 
     const tab = store.getState().terminals.find((t) => t.id === id);
     term.writeln(`\x1b[36m[${tab?.title ?? "term"}] AI Command Center\x1b[0m`);
@@ -87,7 +100,7 @@ export default function TerminalTab({ id }: Props) {
     };
   }, [id, store]);
 
-  return <div ref={hostRef} className="w-full h-full" />;
+  return <div ref={hostRef} className="w-full h-full overflow-x-auto" />;
 }
 
 function attachPty(
@@ -129,7 +142,7 @@ function attachPty(
   })();
 
   const ro = new ResizeObserver(() => {
-    fit.fit();
+    applyFit(term, fit);
     if (ptyId) {
       invoke("pty_resize", {
         id: ptyId,
@@ -289,7 +302,7 @@ function attachDevHostShell(
   });
 
   const ro = new ResizeObserver(() => {
-    fit.fit();
+    applyFit(term, fit);
     if (running && ttyMode && activeExecId) {
       void sendExecResize(activeExecId, term.cols, term.rows);
     }
