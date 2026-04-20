@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import {
   runExec,
   sendExecInput,
@@ -6,97 +6,188 @@ import {
   writeFileToHost,
   type ExecEvent,
 } from "./devHostApi";
+import {
+  __setWebSocketCtorForTests,
+  __resetTermSocketForTests,
+} from "./termSocket";
 
-function streamingResponse(lines: string[]): Response {
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const line of lines) controller.enqueue(encoder.encode(line));
-      controller.close();
-    },
-  });
-  return new Response(stream, {
-    status: 200,
-    headers: { "content-type": "application/x-ndjson" },
-  });
+type Listener = (ev: unknown) => void;
+
+class MockWebSocket {
+  static OPEN = 1;
+  static instances: MockWebSocket[] = [];
+  readyState = 0;
+  sent: string[] = [];
+  private listeners = new Map<string, Set<Listener>>();
+  OPEN = 1;
+  url: string;
+
+  constructor(url: string) {
+    this.url = url;
+    MockWebSocket.instances.push(this);
+    queueMicrotask(() => this.open());
+  }
+
+  addEventListener(type: string, cb: Listener): void {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+    this.listeners.get(type)!.add(cb);
+  }
+
+  removeEventListener(type: string, cb: Listener): void {
+    this.listeners.get(type)?.delete(cb);
+  }
+
+  send(data: string): void {
+    this.sent.push(data);
+  }
+
+  close(): void {
+    this.readyState = 3;
+    this.dispatch("close", {});
+  }
+
+  private open(): void {
+    this.readyState = 1;
+    this.dispatch("open", {});
+  }
+
+  private dispatch(type: string, ev: unknown): void {
+    const set = this.listeners.get(type);
+    if (!set) return;
+    for (const cb of set) cb(ev);
+  }
+
+  emitMessage(payload: unknown): void {
+    this.dispatch("message", { data: JSON.stringify(payload) });
+  }
+
+  emitClose(): void {
+    this.readyState = 3;
+    this.dispatch("close", {});
+  }
 }
+
+function latestSocket(): MockWebSocket {
+  return MockWebSocket.instances[MockWebSocket.instances.length - 1];
+}
+
+function parseLatestSend(index = -1): Record<string, unknown> {
+  const socket = latestSocket();
+  const idx = index < 0 ? socket.sent.length + index : index;
+  return JSON.parse(socket.sent[idx]) as Record<string, unknown>;
+}
+
+async function flush(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+beforeEach(() => {
+  MockWebSocket.instances = [];
+  __setWebSocketCtorForTests(MockWebSocket as unknown as typeof WebSocket);
+  __resetTermSocketForTests();
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
+  __setWebSocketCtorForTests(null);
+  __resetTermSocketForTests();
 });
 
-describe("runExec", () => {
-  it("parses newline-delimited JSON events", async () => {
+describe("runExec (over WebSocket)", () => {
+  it("sends a spawn op and forwards spawned/data/exit events", async () => {
     const events: ExecEvent[] = [];
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      streamingResponse([
-        '{"type":"data","stream":"stdout","data":"hi\\n"}\n',
-        '{"type":"exit","code":0,"signal":null}\n',
-      ])
-    );
-    await runExec("/tmp", "echo hi", (ev) => events.push(ev));
-    expect(events).toHaveLength(2);
-    expect(events[0]).toMatchObject({ type: "data", data: "hi\n" });
-    expect(events[1]).toMatchObject({ type: "exit", code: 0 });
+    const done = runExec("/tmp", "echo hi", (ev) => events.push(ev), undefined, {
+      tty: true,
+      cols: 80,
+      rows: 24,
+    });
+
+    await flush();
+    const sock = latestSocket();
+    const spawnMsg = JSON.parse(sock.sent[0]) as Record<string, unknown>;
+    expect(spawnMsg.op).toBe("spawn");
+    expect(spawnMsg.cmd).toBe("echo hi");
+    expect(spawnMsg.cwd).toBe("/tmp");
+    expect(spawnMsg.tty).toBe(true);
+    const localId = spawnMsg.localId as string;
+
+    sock.emitMessage({ event: "spawned", localId, execId: "exec-1" });
+    sock.emitMessage({ event: "data", execId: "exec-1", stream: "stdout", data: "hi\n" });
+    sock.emitMessage({ event: "exit", execId: "exec-1", code: 0, signal: null });
+
+    await done;
+    expect(events.map((e) => e.type)).toEqual(["spawned", "data", "exit"]);
+    expect(events[0]).toEqual({ type: "spawned", id: "exec-1" });
+    expect(events[1]).toMatchObject({ type: "data", data: "hi\n" });
+    expect(events[2]).toMatchObject({ type: "exit", code: 0 });
   });
 
-  it("handles chunked frames split across reads", async () => {
-    const events: ExecEvent[] = [];
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      streamingResponse([
-        '{"type":"data","stream":"stdout","data":"par',
-        'tial"}\n{"type":"exit","code":0,"signal":null}',
-      ])
-    );
-    await runExec(null, "x", (ev) => events.push(ev));
-    expect(events.map((e) => e.type)).toEqual(["data", "exit"]);
-    expect((events[0] as { data: string }).data).toBe("partial");
+  it("rejects on spawn-error", async () => {
+    const p = runExec(null, "x", () => {});
+    await flush();
+    const sock = latestSocket();
+    const localId = (JSON.parse(sock.sent[0]) as { localId: string }).localId;
+    sock.emitMessage({ event: "spawn-error", localId, error: "boom" });
+    await expect(p).rejects.toThrow(/boom/);
   });
 
-  it("throws on non-2xx", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response("no", { status: 500 })
-    );
-    await expect(runExec(null, "x", () => {})).rejects.toThrow(/HTTP 500/);
-  });
+  it("sends a kill op and rejects with AbortError when aborted", async () => {
+    const controller = new AbortController();
+    const p = runExec(null, "sleep 9999", () => {}, controller.signal);
+    await flush();
+    const sock = latestSocket();
+    const localId = (JSON.parse(sock.sent[0]) as { localId: string }).localId;
+    sock.emitMessage({ event: "spawned", localId, execId: "exec-kill" });
+    await flush();
 
-  it("surfaces spawned events with the exec id", async () => {
-    const events: ExecEvent[] = [];
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      streamingResponse([
-        '{"type":"spawned","id":"abc-123"}\n',
-        '{"type":"data","stream":"stdout","data":"hi"}\n',
-        '{"type":"exit","code":0,"signal":null}\n',
-      ])
-    );
-    await runExec("/tmp", "x", (ev) => events.push(ev));
-    expect(events[0]).toEqual({ type: "spawned", id: "abc-123" });
+    controller.abort();
+    await expect(p).rejects.toMatchObject({ name: "AbortError" });
+    const killMsg = parseLatestSend();
+    expect(killMsg).toEqual({ op: "kill", execId: "exec-kill" });
   });
 });
 
-describe("sendExecInput / sendExecResize", () => {
-  it("POSTs keystrokes to /__execStdin with id + data", async () => {
-    const spy = vi.spyOn(global, "fetch").mockResolvedValue(new Response("{}"));
-    await sendExecInput("abc-123", "\r");
-    expect(spy).toHaveBeenCalledWith(
-      "/__execStdin",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ id: "abc-123", data: "\r" }),
-      })
-    );
+describe("sendExecInput / sendExecResize (over WebSocket)", () => {
+  it("sends a stdin op to the existing socket", async () => {
+    runExec(null, "sh", () => {}).catch(() => {});
+    await flush();
+    const sock = latestSocket();
+    const localId = (JSON.parse(sock.sent[0]) as { localId: string }).localId;
+    sock.emitMessage({ event: "spawned", localId, execId: "exec-123" });
+    await flush();
+
+    await sendExecInput("exec-123", "\r");
+    expect(parseLatestSend()).toEqual({ op: "stdin", execId: "exec-123", data: "\r" });
   });
 
-  it("POSTs resize to /__execResize", async () => {
-    const spy = vi.spyOn(global, "fetch").mockResolvedValue(new Response("{}"));
-    await sendExecResize("abc-123", 120, 30);
-    expect(spy).toHaveBeenCalledWith(
-      "/__execResize",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ id: "abc-123", cols: 120, rows: 30 }),
-      })
-    );
+  it("sends a resize op to the existing socket", async () => {
+    runExec(null, "sh", () => {}).catch(() => {});
+    await flush();
+    const sock = latestSocket();
+    const localId = (JSON.parse(sock.sent[0]) as { localId: string }).localId;
+    sock.emitMessage({ event: "spawned", localId, execId: "exec-123" });
+    await flush();
+
+    await sendExecResize("exec-123", 120, 30);
+    expect(parseLatestSend()).toEqual({ op: "resize", execId: "exec-123", cols: 120, rows: 30 });
+  });
+
+  it("reuses a single WebSocket across multiple terminals in a tab", async () => {
+    const a = runExec(null, "sh", () => {});
+    await flush();
+    const b = runExec(null, "bash", () => {});
+    await flush();
+    expect(MockWebSocket.instances).toHaveLength(1);
+    const sock = latestSocket();
+    const spawnA = JSON.parse(sock.sent[0]) as { localId: string };
+    const spawnB = JSON.parse(sock.sent[1]) as { localId: string };
+    sock.emitMessage({ event: "spawned", localId: spawnA.localId, execId: "a" });
+    sock.emitMessage({ event: "spawned", localId: spawnB.localId, execId: "b" });
+    sock.emitMessage({ event: "exit", execId: "a", code: 0, signal: null });
+    sock.emitMessage({ event: "exit", execId: "b", code: 0, signal: null });
+    await a;
+    await b;
   });
 });
 

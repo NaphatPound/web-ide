@@ -1,23 +1,11 @@
 import type { FileEntry } from "../store/useIdeStore";
+import {
+  termSocket,
+  type ExecEvent,
+  type ExecOptions,
+} from "./termSocket";
 
-export interface ExecChunk {
-  type: "data";
-  stream: "stdout" | "stderr";
-  data: string;
-}
-
-export interface ExecExit {
-  type: "exit";
-  code: number | null;
-  signal: string | null;
-}
-
-export interface ExecSpawned {
-  type: "spawned";
-  id: string;
-}
-
-export type ExecEvent = ExecChunk | ExecExit | ExecSpawned;
+export type { ExecEvent, ExecOptions } from "./termSocket";
 
 export interface PickFolderResult {
   rootName: string;
@@ -49,27 +37,12 @@ export async function pickFolderFromHost(): Promise<PickFolderResult | null> {
   return listed;
 }
 
-export interface ExecOptions {
-  tty?: boolean;
-  cols?: number;
-  rows?: number;
-  autoEnter?: { count: number; intervalMs: number };
-}
-
 export async function sendExecInput(id: string, data: string): Promise<void> {
-  await fetch("/__execStdin", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ id, data }),
-  }).catch(() => {});
+  termSocket.stdin(id, data);
 }
 
 export async function sendExecResize(id: string, cols: number, rows: number): Promise<void> {
-  await fetch("/__execResize", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ id, cols, rows }),
-  }).catch(() => {});
+  termSocket.resize(id, cols, rows);
 }
 
 export async function writeFileToHost(
@@ -95,41 +68,49 @@ export async function runExec(
   signal?: AbortSignal,
   options: ExecOptions = {}
 ): Promise<void> {
-  const res = await fetch("/__exec", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ cwd, cmd, ...options }),
-    signal,
-  });
-  if (!res.ok || !res.body) {
-    throw new Error(`/__exec HTTP ${res.status}`);
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx = buffer.indexOf("\n");
-    while (idx !== -1) {
-      const line = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 1);
-      if (line.trim().length > 0) {
-        try {
-          onEvent(JSON.parse(line) as ExecEvent);
-        } catch {
-          // ignore malformed line
+  return new Promise<void>((resolve, reject) => {
+    let execId: string | null = null;
+    let settled = false;
+    let abortedBeforeSpawn = false;
+    const finish = (err?: Error): void => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve();
+    };
+
+    const handleEvent = (ev: ExecEvent): void => {
+      if (ev.type === "spawned") {
+        execId = ev.id;
+        if (abortedBeforeSpawn) {
+          termSocket.kill(ev.id);
+          return;
         }
       }
-      idx = buffer.indexOf("\n");
+      if (settled) return;
+      onEvent(ev);
+      if (ev.type === "exit") finish();
+    };
+
+    const onAbort = (): void => {
+      if (execId) termSocket.kill(execId);
+      else abortedBeforeSpawn = true;
+      finish(new DOMException("Aborted", "AbortError"));
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        finish(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
     }
-  }
-  if (buffer.trim().length > 0) {
-    try {
-      onEvent(JSON.parse(buffer) as ExecEvent);
-    } catch {
-      // ignore
-    }
-  }
+
+    termSocket
+      .spawn(cwd, cmd, options, handleEvent)
+      .then((id) => {
+        execId = id;
+      })
+      .catch((err) => finish(err as Error));
+  });
 }

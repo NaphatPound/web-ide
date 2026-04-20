@@ -4,6 +4,14 @@ import { promises as fs } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import type { Connect, Plugin, ViteDevServer, PreviewServer } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
+import { WebSocketServer, type WebSocket as WsConnection } from "ws";
+
+type UpgradeHandler = (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
+type UpgradableServer = {
+  on(event: "upgrade", handler: UpgradeHandler): unknown;
+  off(event: "upgrade", handler: UpgradeHandler): unknown;
+};
 
 interface PtyLike {
   onData(cb: (data: string) => void): void;
@@ -12,8 +20,6 @@ interface PtyLike {
   resize(cols: number, rows: number): void;
   kill(signal?: string): void;
 }
-
-const ptyRegistry = new Map<string, PtyLike>();
 
 function newExecId(): string {
   try {
@@ -158,83 +164,50 @@ async function walkDir(
   }
 }
 
-interface ExecBody {
+interface PtyEntry {
+  pty: PtyLike;
+  autoEnterTimer: ReturnType<typeof setInterval> | null;
+  isShim: boolean;
+}
+
+interface TermSession {
+  ws: WsConnection;
+  ptys: Map<string, PtyEntry>;
+}
+
+type SpawnMsg = {
+  op: "spawn";
+  localId: string;
   cwd?: string;
-  cmd?: string;
+  cmd: string;
   tty?: boolean;
   cols?: number;
   rows?: number;
   autoEnter?: { count: number; intervalMs: number };
+};
+type StdinMsg = { op: "stdin"; execId: string; data: string };
+type ResizeMsg = { op: "resize"; execId: string; cols: number; rows: number };
+type KillMsg = { op: "kill"; execId: string };
+type ClientMsg = SpawnMsg | StdinMsg | ResizeMsg | KillMsg;
+
+function safeSend(ws: WsConnection, msg: unknown): void {
+  if (ws.readyState !== ws.OPEN) return;
+  try {
+    ws.send(JSON.stringify(msg));
+  } catch {
+    // ignore send errors on closed sockets
+  }
 }
 
-function handleExec(req: IncomingMessage, res: ServerResponse, body: ExecBody): void {
-  const cwd = typeof body.cwd === "string" && body.cwd.length > 0 ? body.cwd : process.cwd();
-  const cmd = typeof body.cmd === "string" ? body.cmd : "";
-  if (!cmd.trim()) {
-    sendJson(res, 400, { error: "missing cmd" });
-    return;
-  }
-  res.statusCode = 200;
-  res.setHeader("content-type", "application/x-ndjson");
-  res.setHeader("cache-control", "no-cache");
-  res.setHeader("x-accel-buffering", "no");
-
-  const write = (obj: unknown): void => {
-    res.write(JSON.stringify(obj) + "\n");
-  };
-
-  if (body.tty) {
-    const pty = loadPty();
-    if (!pty) {
-      write({
-        type: "data",
-        stream: "stderr",
-        data: "[dev-host] node-pty unavailable; falling back to pipe mode.\n",
-      });
-    } else {
-      runInPty(req, res, cwd, cmd, body, write, pty);
-      return;
-    }
-  }
-
+function spawnPtyForSession(session: TermSession, msg: SpawnMsg, pty: NonNullable<typeof ptyModule>): void {
   const shell = process.env.SHELL || "/bin/sh";
-  const child = spawn(shell, ["-lc", cmd], {
-    cwd,
-    env: { ...process.env, TERM: process.env.TERM || "xterm-256color" },
-  });
-  child.stdout.on("data", (c: Buffer) => write({ type: "data", stream: "stdout", data: c.toString("utf8") }));
-  child.stderr.on("data", (c: Buffer) => write({ type: "data", stream: "stderr", data: c.toString("utf8") }));
-  child.on("error", (err) => write({ type: "data", stream: "stderr", data: `[exec error] ${err.message}\n` }));
-  child.on("close", (code, signal) => {
-    write({ type: "exit", code: code ?? null, signal: signal ?? null });
-    res.end();
-  });
-  req.on("close", () => {
-    if (!child.killed) {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-    }
-  });
-}
+  const cwd = msg.cwd && msg.cwd.length > 0 ? msg.cwd : process.cwd();
+  const cols = Math.max(20, msg.cols ?? 120);
+  const rows = Math.max(5, msg.rows ?? 30);
 
-function runInPty(
-  req: IncomingMessage,
-  res: ServerResponse,
-  cwd: string,
-  cmd: string,
-  body: ExecBody,
-  write: (obj: unknown) => void,
-  pty: NonNullable<typeof ptyModule>
-): void {
-  const shell = process.env.SHELL || "/bin/sh";
-  const cols = Math.max(20, body.cols ?? 120);
-  const rows = Math.max(5, body.rows ?? 30);
   let child: PtyLike;
   try {
-    child = pty.spawn(shell, ["-lc", cmd], {
+    child = pty.spawn(shell, ["-lc", msg.cmd], {
       name: "xterm-256color",
       cols,
       rows,
@@ -242,59 +215,235 @@ function runInPty(
       env: { ...process.env, TERM: "xterm-256color" },
     });
   } catch (err) {
-    write({ type: "data", stream: "stderr", data: `[pty error] ${(err as Error).message}\n` });
-    write({ type: "exit", code: 1, signal: null });
-    res.end();
+    safeSend(session.ws, {
+      event: "spawn-error",
+      localId: msg.localId,
+      error: (err as Error).message,
+    });
     return;
   }
 
-  const id = newExecId();
-  ptyRegistry.set(id, child);
-  write({ type: "spawned", id });
+  const execId = newExecId();
+  const entry: PtyEntry = { pty: child, autoEnterTimer: null, isShim: false };
+  session.ptys.set(execId, entry);
+  safeSend(session.ws, { event: "spawned", localId: msg.localId, execId });
 
   let finished = false;
   const cleanup = (): void => {
     if (finished) return;
     finished = true;
-    ptyRegistry.delete(id);
-    if (autoEnterTimer) {
-      clearInterval(autoEnterTimer);
-      autoEnterTimer = null;
+    if (entry.autoEnterTimer) {
+      clearInterval(entry.autoEnterTimer);
+      entry.autoEnterTimer = null;
     }
+    session.ptys.delete(execId);
   };
 
-  child.onData((chunk) => write({ type: "data", stream: "stdout", data: chunk }));
+  child.onData((chunk) => {
+    safeSend(session.ws, { event: "data", execId, stream: "stdout", data: chunk });
+  });
 
-  let autoEnterTimer: ReturnType<typeof setInterval> | null = null;
-  if (body.autoEnter && body.autoEnter.count > 0) {
-    const { count, intervalMs } = body.autoEnter;
+  if (msg.autoEnter && msg.autoEnter.count > 0) {
+    const { count, intervalMs } = msg.autoEnter;
     let sent = 0;
-    autoEnterTimer = setInterval(() => {
+    entry.autoEnterTimer = setInterval(() => {
       if (finished) return;
       child.write("\r");
       sent += 1;
-      if (sent >= count && autoEnterTimer) {
-        clearInterval(autoEnterTimer);
-        autoEnterTimer = null;
+      if (sent >= count && entry.autoEnterTimer) {
+        clearInterval(entry.autoEnterTimer);
+        entry.autoEnterTimer = null;
       }
     }, Math.max(50, intervalMs));
   }
 
   child.onExit(({ exitCode, signal }) => {
     cleanup();
-    write({ type: "exit", code: exitCode ?? null, signal: signal ? String(signal) : null });
-    res.end();
+    safeSend(session.ws, {
+      event: "exit",
+      execId,
+      code: exitCode ?? null,
+      signal: signal ? String(signal) : null,
+    });
   });
+}
 
-  req.on("close", () => {
-    if (finished) return;
-    cleanup();
+function spawnPipeForSession(session: TermSession, msg: SpawnMsg, prelude?: string): void {
+  const shell = process.env.SHELL || "/bin/sh";
+  const cwd = msg.cwd && msg.cwd.length > 0 ? msg.cwd : process.cwd();
+  const child = spawn(shell, ["-lc", msg.cmd], {
+    cwd,
+    env: { ...process.env, TERM: process.env.TERM || "xterm-256color" },
+  });
+  const execId = newExecId();
+  const shim: PtyLike = {
+    onData: () => {},
+    onExit: () => {},
+    write: (data: string) => {
+      child.stdin?.write(data);
+    },
+    resize: () => {},
+    kill: (sig?: string) => {
+      try {
+        child.kill((sig ?? "SIGTERM") as NodeJS.Signals);
+      } catch {
+        // ignore
+      }
+    },
+  };
+  session.ptys.set(execId, { pty: shim, autoEnterTimer: null, isShim: true });
+  safeSend(session.ws, { event: "spawned", localId: msg.localId, execId });
+  if (prelude) {
+    safeSend(session.ws, { event: "data", execId, stream: "stderr", data: prelude });
+  }
+  child.stdout.on("data", (c: Buffer) =>
+    safeSend(session.ws, { event: "data", execId, stream: "stdout", data: c.toString("utf8") })
+  );
+  child.stderr.on("data", (c: Buffer) =>
+    safeSend(session.ws, { event: "data", execId, stream: "stderr", data: c.toString("utf8") })
+  );
+  child.on("error", (err) =>
+    safeSend(session.ws, {
+      event: "data",
+      execId,
+      stream: "stderr",
+      data: `[exec error] ${err.message}\n`,
+    })
+  );
+  child.on("close", (code, signal) => {
+    session.ptys.delete(execId);
+    safeSend(session.ws, {
+      event: "exit",
+      execId,
+      code: code ?? null,
+      signal: signal ?? null,
+    });
+  });
+}
+
+function handleSpawn(session: TermSession, msg: SpawnMsg): void {
+  if (!msg.cmd || !msg.cmd.trim()) {
+    safeSend(session.ws, {
+      event: "spawn-error",
+      localId: msg.localId,
+      error: "missing cmd",
+    });
+    return;
+  }
+  if (msg.tty) {
+    const pty = loadPty();
+    if (!pty) {
+      spawnPipeForSession(
+        session,
+        msg,
+        "[dev-host] node-pty unavailable; falling back to pipe mode.\n"
+      );
+      return;
+    }
+    spawnPtyForSession(session, msg, pty);
+    return;
+  }
+  spawnPipeForSession(session, msg);
+}
+
+function handleWsConnection(ws: WsConnection): void {
+  const session: TermSession = { ws, ptys: new Map() };
+
+  ws.on("message", (raw: Buffer | ArrayBuffer | Buffer[]) => {
+    let msg: ClientMsg;
     try {
-      child.kill("SIGTERM");
+      const text =
+        typeof raw === "string"
+          ? raw
+          : Buffer.isBuffer(raw)
+            ? raw.toString("utf8")
+            : Array.isArray(raw)
+              ? Buffer.concat(raw).toString("utf8")
+              : Buffer.from(raw as ArrayBuffer).toString("utf8");
+      msg = JSON.parse(text) as ClientMsg;
     } catch {
-      // ignore
+      return;
+    }
+    switch (msg.op) {
+      case "spawn":
+        handleSpawn(session, msg);
+        break;
+      case "stdin": {
+        const entry = session.ptys.get(msg.execId);
+        if (!entry) return;
+        try {
+          entry.pty.write(msg.data);
+        } catch {
+          // ignore write-on-dead-pty
+        }
+        break;
+      }
+      case "resize": {
+        const entry = session.ptys.get(msg.execId);
+        if (!entry || entry.isShim) return;
+        try {
+          entry.pty.resize(Math.max(10, msg.cols), Math.max(5, msg.rows));
+        } catch {
+          // ignore
+        }
+        break;
+      }
+      case "kill": {
+        const entry = session.ptys.get(msg.execId);
+        if (!entry) return;
+        if (entry.autoEnterTimer) {
+          clearInterval(entry.autoEnterTimer);
+          entry.autoEnterTimer = null;
+        }
+        try {
+          entry.pty.kill("SIGTERM");
+        } catch {
+          // ignore
+        }
+        session.ptys.delete(msg.execId);
+        break;
+      }
     }
   });
+
+  const tearDown = (): void => {
+    for (const entry of session.ptys.values()) {
+      if (entry.autoEnterTimer) clearInterval(entry.autoEnterTimer);
+      try {
+        entry.pty.kill("SIGTERM");
+      } catch {
+        // ignore
+      }
+    }
+    session.ptys.clear();
+  };
+
+  ws.on("close", tearDown);
+  ws.on("error", () => {});
+}
+
+function attachWs(httpServer: UpgradableServer | null | undefined): () => void {
+  if (!httpServer) return () => {};
+  const wss = new WebSocketServer({ noServer: true });
+
+  const onUpgrade: UpgradeHandler = (req, socket, head) => {
+    let pathname = "";
+    try {
+      pathname = new URL(req.url ?? "", "http://x").pathname;
+    } catch {
+      return;
+    }
+    if (pathname !== "/__term-ws") return;
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      handleWsConnection(ws);
+    });
+  };
+
+  httpServer.on("upgrade", onUpgrade);
+  return () => {
+    httpServer.off("upgrade", onUpgrade);
+    wss.close();
+  };
 }
 
 function attach(middlewares: Connect.Server): void {
@@ -334,60 +483,6 @@ function attach(middlewares: Connect.Server): void {
     );
   });
 
-  middlewares.use("/__execStdin", (req, res) => {
-    if (req.method !== "POST") {
-      sendJson(res, 405, { error: "method not allowed" });
-      return;
-    }
-    readJsonBody<{ id?: string; data?: string }>(req).then(
-      (body) => {
-        if (!body.id || typeof body.data !== "string") {
-          sendJson(res, 400, { error: "missing id or data" });
-          return;
-        }
-        const pty = ptyRegistry.get(body.id);
-        if (!pty) {
-          sendJson(res, 404, { error: "no such exec" });
-          return;
-        }
-        try {
-          pty.write(body.data);
-          sendJson(res, 200, { ok: true });
-        } catch (err) {
-          sendJson(res, 500, { error: (err as Error).message });
-        }
-      },
-      (err: Error) => sendJson(res, 400, { error: err.message })
-    );
-  });
-
-  middlewares.use("/__execResize", (req, res) => {
-    if (req.method !== "POST") {
-      sendJson(res, 405, { error: "method not allowed" });
-      return;
-    }
-    readJsonBody<{ id?: string; cols?: number; rows?: number }>(req).then(
-      (body) => {
-        if (!body.id || !body.cols || !body.rows) {
-          sendJson(res, 400, { error: "missing id/cols/rows" });
-          return;
-        }
-        const pty = ptyRegistry.get(body.id);
-        if (!pty) {
-          sendJson(res, 404, { error: "no such exec" });
-          return;
-        }
-        try {
-          pty.resize(Math.max(10, body.cols), Math.max(5, body.rows));
-          sendJson(res, 200, { ok: true });
-        } catch (err) {
-          sendJson(res, 500, { error: (err as Error).message });
-        }
-      },
-      (err: Error) => sendJson(res, 400, { error: err.message })
-    );
-  });
-
   middlewares.use("/__writeFile", (req, res) => {
     if (req.method !== "POST") {
       sendJson(res, 405, { error: "method not allowed" });
@@ -421,17 +516,6 @@ function attach(middlewares: Connect.Server): void {
       (err: Error) => sendJson(res, 400, { error: err.message })
     );
   });
-
-  middlewares.use("/__exec", (req, res) => {
-    if (req.method !== "POST") {
-      sendJson(res, 405, { error: "method not allowed" });
-      return;
-    }
-    readJsonBody<{ cwd?: string; cmd?: string }>(req).then(
-      (body) => handleExec(req, res, body),
-      (err: Error) => sendJson(res, 400, { error: err.message })
-    );
-  });
 }
 
 export function devHost(): Plugin {
@@ -439,9 +523,11 @@ export function devHost(): Plugin {
     name: "web-ide-dev-host",
     configureServer(server: ViteDevServer) {
       attach(server.middlewares);
+      attachWs(server.httpServer as unknown as UpgradableServer | null);
     },
     configurePreviewServer(server: PreviewServer) {
       attach(server.middlewares);
+      attachWs(server.httpServer as unknown as UpgradableServer | null);
     },
   };
 }
