@@ -13,10 +13,26 @@ describe("shortcuts store", () => {
     const id = useIdeStore.getState().addShortcut("deploy", "npm run deploy");
     const shortcuts = useIdeStore.getState().shortcuts;
     expect(shortcuts).toHaveLength(1);
-    expect(shortcuts[0]).toMatchObject({ id, name: "deploy", command: "npm run deploy" });
+    expect(shortcuts[0]).toMatchObject({
+      id,
+      name: "deploy",
+      command: "npm run deploy",
+      type: "command",
+    });
     const raw = window.localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw as string)).toEqual(shortcuts);
+  });
+
+  it("addShortcut accepts an explicit type", () => {
+    useIdeStore.getState().addShortcut("hello", "echo {{who}}", "template");
+    expect(useIdeStore.getState().shortcuts[0].type).toBe("template");
+  });
+
+  it("updateShortcut can change the type", () => {
+    const id = useIdeStore.getState().addShortcut("raw", "text only");
+    useIdeStore.getState().updateShortcut(id, { type: "text" });
+    expect(useIdeStore.getState().shortcuts[0].type).toBe("text");
   });
 
   it("updateShortcut changes only the named fields", () => {

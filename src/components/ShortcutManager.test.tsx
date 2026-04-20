@@ -7,8 +7,8 @@ beforeEach(() => {
   window.localStorage.clear();
   useIdeStore.setState({
     shortcuts: [
-      { id: "s1", name: "ls", command: "ls -la" },
-      { id: "s2", name: "status", command: "git status" },
+      { id: "s1", name: "ls", command: "ls -la", type: "command" },
+      { id: "s2", name: "status", command: "git status", type: "command" },
     ],
   });
 });
@@ -40,7 +40,53 @@ describe("ShortcutManager", () => {
   it("adds a new shortcut", () => {
     render(<ShortcutManager onClose={() => {}} />);
     fireEvent.click(screen.getByTestId("shortcut-manager-add"));
-    expect(useIdeStore.getState().shortcuts).toHaveLength(3);
+    const shortcuts = useIdeStore.getState().shortcuts;
+    expect(shortcuts).toHaveLength(3);
+    expect(shortcuts[2].type).toBe("command");
+  });
+
+  it("changes a shortcut's type via the dropdown", () => {
+    render(<ShortcutManager onClose={() => {}} />);
+    const select = screen.getByTestId("shortcut-type-s1") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "template" } });
+    expect(
+      useIdeStore.getState().shortcuts.find((s) => s.id === "s1")?.type
+    ).toBe("template");
+  });
+
+  it("shows detected template variables for template rows", () => {
+    useIdeStore.setState({
+      shortcuts: [
+        {
+          id: "st",
+          name: "tpl",
+          command: "echo {{greeting}} {{name}} {{greeting}}",
+          type: "template",
+        },
+      ],
+    });
+    render(<ShortcutManager onClose={() => {}} />);
+    const vars = screen.getByTestId("shortcut-vars-st");
+    expect(vars.textContent).toMatch(/greeting/);
+    expect(vars.textContent).toMatch(/name/);
+  });
+
+  it("hints when a template row has no variables yet", () => {
+    useIdeStore.setState({
+      shortcuts: [
+        { id: "st", name: "tpl", command: "no placeholders here", type: "template" },
+      ],
+    });
+    render(<ShortcutManager onClose={() => {}} />);
+    const vars = screen.getByTestId("shortcut-vars-st");
+    expect(vars.textContent).toMatch(/No variables/i);
+  });
+
+  it("shows a color legend for all three types", () => {
+    render(<ShortcutManager onClose={() => {}} />);
+    expect(screen.getByTestId("legend-command")).toBeDefined();
+    expect(screen.getByTestId("legend-text")).toBeDefined();
+    expect(screen.getByTestId("legend-template")).toBeDefined();
   });
 
   it("calls onClose when the × button is pressed", () => {

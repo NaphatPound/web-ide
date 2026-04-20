@@ -19,19 +19,26 @@ export interface TerminalEntry {
   initialAutoEnter?: { count: number; intervalMs: number };
 }
 
+export type ShortcutType = "command" | "text" | "template";
+
 export interface ShortcutEntry {
   id: string;
   name: string;
   command: string;
+  type: ShortcutType;
 }
 
 const SHORTCUTS_STORAGE_KEY = "web-ide:shortcuts";
 
 const DEFAULT_SHORTCUTS: ShortcutEntry[] = [
-  { id: "s-ls", name: "ls", command: "ls -la" },
-  { id: "s-git-status", name: "git status", command: "git status" },
-  { id: "s-clear", name: "clear", command: "clear" },
+  { id: "s-ls", name: "ls", command: "ls -la", type: "command" },
+  { id: "s-git-status", name: "git status", command: "git status", type: "command" },
+  { id: "s-clear", name: "clear", command: "clear", type: "command" },
 ];
+
+function coerceType(raw: unknown): ShortcutType {
+  return raw === "text" || raw === "template" ? raw : "command";
+}
 
 function loadShortcuts(): ShortcutEntry[] {
   if (typeof window === "undefined") return DEFAULT_SHORTCUTS.map((s) => ({ ...s }));
@@ -40,14 +47,21 @@ function loadShortcuts(): ShortcutEntry[] {
     if (!raw) return DEFAULT_SHORTCUTS.map((s) => ({ ...s }));
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return DEFAULT_SHORTCUTS.map((s) => ({ ...s }));
-    return parsed.filter(
-      (s): s is ShortcutEntry =>
-        typeof s === "object" &&
-        s !== null &&
-        typeof (s as { id?: unknown }).id === "string" &&
-        typeof (s as { name?: unknown }).name === "string" &&
-        typeof (s as { command?: unknown }).command === "string"
-    );
+    return parsed
+      .filter(
+        (s): s is { id: string; name: string; command: string; type?: unknown } =>
+          typeof s === "object" &&
+          s !== null &&
+          typeof (s as { id?: unknown }).id === "string" &&
+          typeof (s as { name?: unknown }).name === "string" &&
+          typeof (s as { command?: unknown }).command === "string"
+      )
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        command: s.command,
+        type: coerceType(s.type),
+      }));
   } catch {
     return DEFAULT_SHORTCUTS.map((s) => ({ ...s }));
   }
@@ -103,7 +117,7 @@ interface IdeState {
   removeTerminal: (id: string) => void;
   setActiveTerminalId: (id: string | null) => void;
   startAiTerminals: () => void;
-  addShortcut: (name: string, command: string) => string;
+  addShortcut: (name: string, command: string, type?: ShortcutType) => string;
   updateShortcut: (
     id: string,
     updates: Partial<Omit<ShortcutEntry, "id">>
@@ -234,10 +248,10 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     }));
   },
 
-  addShortcut: (name, command) => {
+  addShortcut: (name, command, type = "command") => {
     const id = newShortcutId();
     set((s) => {
-      const shortcuts = [...s.shortcuts, { id, name, command }];
+      const shortcuts = [...s.shortcuts, { id, name, command, type }];
       saveShortcuts(shortcuts);
       return { shortcuts };
     });
