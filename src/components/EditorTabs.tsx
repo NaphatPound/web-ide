@@ -51,6 +51,7 @@ export default function EditorTabs() {
       {openFiles.map((path, i) => {
         const entry = files[path];
         const dirty = !!entry?.dirty;
+        const diskChanged = !!entry?.diskChanged;
         const active = activeFile === path;
         return (
           <div
@@ -80,6 +81,16 @@ export default function EditorTabs() {
           >
             {active && (
               <span className="absolute top-0 left-0 right-0 h-[2px] bg-ide-accent" aria-hidden />
+            )}
+            {diskChanged && (
+              <span
+                data-testid={`disk-changed-${path}`}
+                title="File on disk changed while you had unsaved edits"
+                className="text-amber-400 text-[10px] font-bold"
+                aria-label="disk changed"
+              >
+                !
+              </span>
             )}
             <span className="truncate max-w-[200px]">{labels[i]}</span>
             {dirty ? (

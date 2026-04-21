@@ -9,6 +9,8 @@ export interface FileEntry {
   language: string;
   content: string;
   dirty?: boolean;
+  mtimeMs?: number;
+  diskChanged?: boolean;
 }
 
 export interface TerminalEntry {
@@ -164,6 +166,8 @@ interface IdeState {
   closeFile: (path: string) => void;
   updateFile: (path: string, content: string) => void;
   markFileSaved: (path: string) => void;
+  syncFileFromDisk: (path: string, content: string, mtimeMs: number) => void;
+  acknowledgeDiskChange: (path: string) => void;
   loadFolder: (
     rootName: string,
     files: Record<string, FileEntry>,
@@ -267,6 +271,45 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       if (!existing || !existing.dirty) return s;
       return {
         files: { ...s.files, [path]: { ...existing, dirty: false } },
+      };
+    }),
+
+  syncFileFromDisk: (path, content, mtimeMs) =>
+    set((s) => {
+      const existing = s.files[path];
+      if (!existing) return s;
+      if (existing.dirty) {
+        // Disk diverged from in-memory edits; flag but don't overwrite.
+        if (existing.content === content) return s;
+        if (existing.diskChanged && existing.mtimeMs === mtimeMs) return s;
+        return {
+          files: {
+            ...s.files,
+            [path]: { ...existing, diskChanged: true, mtimeMs },
+          },
+        };
+      }
+      if (existing.content === content && existing.mtimeMs === mtimeMs) return s;
+      return {
+        files: {
+          ...s.files,
+          [path]: {
+            ...existing,
+            content,
+            mtimeMs,
+            diskChanged: false,
+            dirty: false,
+          },
+        },
+      };
+    }),
+
+  acknowledgeDiskChange: (path) =>
+    set((s) => {
+      const existing = s.files[path];
+      if (!existing || !existing.diskChanged) return s;
+      return {
+        files: { ...s.files, [path]: { ...existing, diskChanged: false } },
       };
     }),
 

@@ -190,6 +190,40 @@ describe("useIdeStore", () => {
     expect(s.activeFile).toBe("proj/keep.ts");
   });
 
+  it("syncFileFromDisk updates content and mtime on a clean file", () => {
+    useIdeStore.getState().syncFileFromDisk("README.md", "# fresh", 1000);
+    const entry = useIdeStore.getState().files["README.md"];
+    expect(entry.content).toBe("# fresh");
+    expect(entry.mtimeMs).toBe(1000);
+    expect(entry.dirty).toBeFalsy();
+    expect(entry.diskChanged).toBeFalsy();
+  });
+
+  it("syncFileFromDisk on a dirty file flags diskChanged without overwriting", () => {
+    useIdeStore.getState().updateFile("README.md", "local edit");
+    useIdeStore.getState().syncFileFromDisk("README.md", "external edit", 2000);
+    const entry = useIdeStore.getState().files["README.md"];
+    expect(entry.content).toBe("local edit");
+    expect(entry.dirty).toBe(true);
+    expect(entry.diskChanged).toBe(true);
+    expect(entry.mtimeMs).toBe(2000);
+  });
+
+  it("syncFileFromDisk is a no-op when content and mtime match", () => {
+    useIdeStore.getState().syncFileFromDisk("README.md", "# Welcome\n", 1);
+    const before = useIdeStore.getState().files;
+    useIdeStore.getState().syncFileFromDisk("README.md", "# Welcome\n", 1);
+    expect(useIdeStore.getState().files).toBe(before);
+  });
+
+  it("acknowledgeDiskChange clears the flag", () => {
+    useIdeStore.getState().updateFile("README.md", "local edit");
+    useIdeStore.getState().syncFileFromDisk("README.md", "external", 5);
+    expect(useIdeStore.getState().files["README.md"].diskChanged).toBe(true);
+    useIdeStore.getState().acknowledgeDiskChange("README.md");
+    expect(useIdeStore.getState().files["README.md"].diskChanged).toBeFalsy();
+  });
+
   it("loadFolder resets openFiles to just the first file", () => {
     useIdeStore.getState().loadFolder("proj", {
       "proj/a": { path: "proj/a", language: "plaintext", content: "" },

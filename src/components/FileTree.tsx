@@ -9,6 +9,9 @@ interface Props {
   renamingPath?: string | null;
   onRenameSubmit?: (node: FileTreeNode, newName: string) => void;
   onRenameCancel?: () => void;
+  selectedDirPath?: string | null;
+  onSelectDir?: (dirPath: string) => void;
+  onMove?: (srcPath: string, targetDirPath: string) => void;
 }
 
 function fileIcon(name: string): string {
@@ -54,6 +57,19 @@ interface RowProps {
   renamingPath?: string | null;
   onRenameSubmit?: (node: FileTreeNode, newName: string) => void;
   onRenameCancel?: () => void;
+  selectedDirPath?: string | null;
+  onSelectDir?: (dirPath: string) => void;
+  onMove?: (srcPath: string, targetDirPath: string) => void;
+  dragOverPath: string | null;
+  setDragOverPath: (p: string | null) => void;
+}
+
+const DRAG_MIME = "application/x-webide-path";
+
+function parentDirPath(path: string): string | null {
+  const idx = path.lastIndexOf("/");
+  if (idx <= 0) return null;
+  return path.slice(0, idx);
 }
 
 function RenameInput({
@@ -102,15 +118,35 @@ function Row({
   renamingPath,
   onRenameSubmit,
   onRenameCancel,
+  selectedDirPath,
+  onSelectDir,
+  onMove,
+  dragOverPath,
+  setDragOverPath,
 }: RowProps) {
   const indent = 6 + depth * 12;
   const renaming = renamingPath === node.path;
+
+  const dragProps = onMove
+    ? {
+        draggable: !renaming,
+        onDragStart: (e: React.DragEvent<HTMLDivElement>) => {
+          e.dataTransfer.setData(DRAG_MIME, node.path);
+          e.dataTransfer.effectAllowed = "move";
+        },
+      }
+    : {};
 
   if (node.type === "file") {
     const active = activePath === node.path;
     return (
       <div
-        onClick={() => !renaming && onOpen(node.path)}
+        {...dragProps}
+        onClick={() => {
+          if (renaming) return;
+          onSelectDir?.(parentDirPath(node.path) ?? node.path);
+          onOpen(node.path);
+        }}
         onContextMenu={(e) => {
           if (!onContextMenu) return;
           e.preventDefault();
@@ -144,17 +180,58 @@ function Row({
     );
   }
   const isOpen = expanded.has(node.path);
+  const isSelectedDir = selectedDirPath === node.path;
+  const isDragOver = dragOverPath === node.path;
+
+  const dropProps = onMove
+    ? {
+        onDragOver: (e: React.DragEvent<HTMLDivElement>) => {
+          if (!e.dataTransfer.types.includes(DRAG_MIME)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          if (dragOverPath !== node.path) setDragOverPath(node.path);
+        },
+        onDragLeave: (e: React.DragEvent<HTMLDivElement>) => {
+          if (
+            !e.currentTarget.contains(e.relatedTarget as Node | null) &&
+            dragOverPath === node.path
+          ) {
+            setDragOverPath(null);
+          }
+        },
+        onDrop: (e: React.DragEvent<HTMLDivElement>) => {
+          e.preventDefault();
+          const src = e.dataTransfer.getData(DRAG_MIME);
+          setDragOverPath(null);
+          if (src) onMove(src, node.path);
+        },
+      }
+    : {};
+
   return (
     <>
       <div
-        onClick={() => !renaming && toggle(node.path)}
+        {...dragProps}
+        {...dropProps}
+        onClick={() => {
+          if (renaming) return;
+          onSelectDir?.(node.path);
+          toggle(node.path);
+        }}
         onContextMenu={(e) => {
           if (!onContextMenu) return;
           e.preventDefault();
           onContextMenu(node, e.clientX, e.clientY);
         }}
         title={node.path}
-        className="w-full text-left flex items-center gap-1.5 pr-2 py-[3px] text-[13px] leading-snug text-ide-text hover:bg-white/5 cursor-pointer"
+        data-testid={`tree-folder-${node.path}`}
+        className={`w-full text-left flex items-center gap-1.5 pr-2 py-[3px] text-[13px] leading-snug text-ide-text cursor-pointer transition-colors ${
+          isDragOver
+            ? "bg-ide-accent/40 ring-1 ring-ide-accent"
+            : isSelectedDir
+              ? "bg-white/10"
+              : "hover:bg-white/5"
+        }`}
         style={{ paddingLeft: `${indent}px` }}
       >
         <span
@@ -191,6 +268,11 @@ function Row({
             renamingPath={renamingPath}
             onRenameSubmit={onRenameSubmit}
             onRenameCancel={onRenameCancel}
+            selectedDirPath={selectedDirPath}
+            onSelectDir={onSelectDir}
+            onMove={onMove}
+            dragOverPath={dragOverPath}
+            setDragOverPath={setDragOverPath}
           />
         ))}
     </>
@@ -205,6 +287,9 @@ export default function FileTree({
   renamingPath,
   onRenameSubmit,
   onRenameCancel,
+  selectedDirPath,
+  onSelectDir,
+  onMove,
 }: Props) {
   const paths = useMemo(() => Object.keys(files), [files]);
   const tree = useMemo(() => buildFileTree(paths), [paths]);
@@ -218,6 +303,7 @@ export default function FileTree({
   }, [tree, activePath]);
 
   const [expanded, setExpanded] = useState<Set<string>>(defaultExpanded);
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
 
   useEffect(() => {
     setExpanded((prev) => {
@@ -260,6 +346,11 @@ export default function FileTree({
           renamingPath={renamingPath}
           onRenameSubmit={onRenameSubmit}
           onRenameCancel={onRenameCancel}
+          selectedDirPath={selectedDirPath}
+          onSelectDir={onSelectDir}
+          onMove={onMove}
+          dragOverPath={dragOverPath}
+          setDragOverPath={setDragOverPath}
         />
       ))}
     </div>

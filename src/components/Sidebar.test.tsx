@@ -3,6 +3,22 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import Sidebar from "./Sidebar";
 import { useIdeStore } from "../store/useIdeStore";
 
+class MockDataTransfer {
+  private data = new Map<string, string>();
+  types: string[] = [];
+  effectAllowed = "none";
+  dropEffect = "none";
+  setData(type: string, value: string): void {
+    this.data.set(type, value);
+    if (!this.types.includes(type)) this.types.push(type);
+  }
+  getData(type: string): string {
+    return this.data.get(type) ?? "";
+  }
+}
+
+const makeDT = (): MockDataTransfer => new MockDataTransfer();
+
 beforeEach(() => {
   useIdeStore.setState({
     mode: "vs_code",
@@ -126,6 +142,37 @@ describe("Sidebar create file / folder", () => {
     expect((screen.getByTestId("new-file") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByTestId("new-folder") as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it("Refresh re-scans the folder and adds new paths without touching existing ones", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          rootName: "proj",
+          rootPath: "/Users/me/proj",
+          files: {
+            "proj/README.md": {
+              path: "proj/README.md",
+              language: "markdown",
+              content: "# stale (should be ignored)",
+            },
+            "proj/SA/plan.md": {
+              path: "proj/SA/plan.md",
+              language: "markdown",
+              content: "# plan",
+            },
+          },
+        }),
+        { status: 200 }
+      )
+    );
+    render(<Sidebar />);
+    fireEvent.click(screen.getByTestId("refresh-folder"));
+    await waitFor(() => {
+      expect(useIdeStore.getState().files["proj/SA/plan.md"]).toBeDefined();
+    });
+    // existing file content must not be clobbered by refresh
+    expect(useIdeStore.getState().files["proj/README.md"].content).toBe("# hi");
+  });
 });
 
 describe("Sidebar right-click rename / delete", () => {
@@ -240,10 +287,125 @@ describe("Sidebar right-click rename / delete", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("right-click on the root folder is ignored", () => {
+  it("right-click on the root folder shows New File / New Folder only", () => {
     render(<Sidebar />);
-    const rootRow = screen.getByTitle("proj");
-    fireEvent.contextMenu(rootRow, { clientX: 10, clientY: 10 });
-    expect(screen.queryByTestId("context-menu")).toBeNull();
+    fireEvent.contextMenu(screen.getByTitle("proj"), { clientX: 10, clientY: 10 });
+    expect(screen.getByTestId("context-menu-new file")).toBeDefined();
+    expect(screen.getByTestId("context-menu-new folder")).toBeDefined();
+    expect(screen.queryByTestId("context-menu-rename")).toBeNull();
+    expect(screen.queryByTestId("context-menu-delete")).toBeNull();
+  });
+});
+
+describe("Sidebar create under selected folder + drag/drop", () => {
+  beforeEach(() => {
+    useIdeStore.setState({
+      files: {
+        "proj/README.md": { path: "proj/README.md", language: "markdown", content: "# hi" },
+        "proj/src/a.ts": { path: "proj/src/a.ts", language: "typescript", content: "a" },
+        "proj/src/b.ts": { path: "proj/src/b.ts", language: "typescript", content: "b" },
+        "proj/src/nested/c.ts": { path: "proj/src/nested/c.ts", language: "typescript", content: "c" },
+      },
+      activeFile: "proj/README.md",
+      openFiles: ["proj/README.md"],
+      rootName: "proj",
+      rootPath: "/Users/me/proj",
+    });
+  });
+
+  it("+File prefills the input under the currently-selected folder", () => {
+    render(<Sidebar />);
+    // click the src folder to select it
+    fireEvent.click(screen.getByTitle("proj/src"));
+    fireEvent.click(screen.getByTestId("new-file"));
+    expect((screen.getByTestId("create-input") as HTMLInputElement).value).toBe(
+      "src/newfile.ts"
+    );
+  });
+
+  it("right-click folder → New File prefills under that folder", () => {
+    render(<Sidebar />);
+    fireEvent.click(screen.getByTitle("proj/src")); // expand src
+    fireEvent.contextMenu(screen.getByTitle("proj/src/nested"), { clientX: 1, clientY: 1 });
+    fireEvent.click(screen.getByTestId("context-menu-new file"));
+    expect((screen.getByTestId("create-input") as HTMLInputElement).value).toBe(
+      "src/nested/newfile.ts"
+    );
+  });
+
+  it("clicking a file selects its parent folder (so +File lands next to it)", () => {
+    render(<Sidebar />);
+    fireEvent.click(screen.getByTitle("proj/src")); // expand src
+    fireEvent.click(screen.getByTitle("proj/src/a.ts"));
+    fireEvent.click(screen.getByTestId("new-file"));
+    expect((screen.getByTestId("create-input") as HTMLInputElement).value).toBe(
+      "src/newfile.ts"
+    );
+  });
+
+  it("drag a file and drop it on another folder calls /__renamePath with the new path", async () => {
+    const fetchSpy = vi
+      .spyOn(global, "fetch")
+      .mockResolvedValue(new Response('{"ok":true}', { status: 200 }));
+    render(<Sidebar />);
+    fireEvent.click(screen.getByTitle("proj/src")); // expand src
+    const src = screen.getByTitle("proj/src/a.ts");
+    const target = screen.getByTestId("tree-folder-proj/src/nested");
+
+    const dt = makeDT();
+    fireEvent.dragStart(src, { dataTransfer: dt });
+    fireEvent.dragOver(target, { dataTransfer: dt });
+    fireEvent.drop(target, { dataTransfer: dt });
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/__renamePath",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toEqual({
+      rootPath: "/Users/me/proj",
+      fromRel: "src/a.ts",
+      toRel: "src/nested/a.ts",
+    });
+    await waitFor(() => {
+      expect(useIdeStore.getState().files["proj/src/nested/a.ts"]).toBeDefined();
+      expect(useIdeStore.getState().files["proj/src/a.ts"]).toBeUndefined();
+    });
+  });
+
+  it("dropping a folder into its own descendant is rejected and does not call the server", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch");
+    render(<Sidebar />);
+    fireEvent.click(screen.getByTitle("proj/src")); // expand src
+    const src = screen.getByTitle("proj/src");
+    const target = screen.getByTestId("tree-folder-proj/src/nested");
+
+    const dt = makeDT();
+    fireEvent.dragStart(src, { dataTransfer: dt });
+    fireEvent.dragOver(target, { dataTransfer: dt });
+    fireEvent.drop(target, { dataTransfer: dt });
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(/descendant/i);
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("dropping a file onto its current parent folder is a no-op", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch");
+    render(<Sidebar />);
+    fireEvent.click(screen.getByTitle("proj/src")); // expand src
+    const src = screen.getByTitle("proj/src/a.ts");
+    const target = screen.getByTestId("tree-folder-proj/src");
+
+    const dt = makeDT();
+    fireEvent.dragStart(src, { dataTransfer: dt });
+    fireEvent.dragOver(target, { dataTransfer: dt });
+    fireEvent.drop(target, { dataTransfer: dt });
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

@@ -2,11 +2,13 @@ import { motion } from "framer-motion";
 import Layout from "./components/Layout";
 import { useModeHotkey } from "./hooks/useModeHotkey";
 import { useStartupConfig } from "./hooks/useStartupConfig";
+import { useFileSyncWatcher } from "./hooks/useFileSyncWatcher";
 import { useIdeStore } from "./store/useIdeStore";
 
 export default function App() {
   useModeHotkey();
   useStartupConfig();
+  useFileSyncWatcher();
   const mode = useIdeStore((s) => s.mode);
   return (
     <div className="h-full relative" data-mode={mode}>

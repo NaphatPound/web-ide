@@ -25,16 +25,15 @@ export async function pickFolderFromHost(): Promise<PickFolderResult | null> {
     | { cancelled: true }
     | { path: string; name: string };
   if ("cancelled" in picked) return null;
-  const list = await fetch(
-    `/__listFolder?path=${encodeURIComponent(picked.path)}`
-  );
+  return listFolderFromHost(picked.path);
+}
+
+export async function listFolderFromHost(
+  rootPath: string
+): Promise<PickFolderResult> {
+  const list = await fetch(`/__listFolder?path=${encodeURIComponent(rootPath)}`);
   if (!list.ok) throw new Error(`listFolder: HTTP ${list.status}`);
-  const listed = (await list.json()) as {
-    rootName: string;
-    rootPath: string;
-    files: Record<string, FileEntry>;
-  };
-  return listed;
+  return (await list.json()) as PickFolderResult;
 }
 
 export async function sendExecInput(id: string, data: string): Promise<void> {

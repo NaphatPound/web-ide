@@ -9,6 +9,7 @@ import {
 import {
   createFolderOnHost,
   deletePathOnHost,
+  listFolderFromHost,
   pickFolderFromHost,
   renamePathOnHost,
   writeFileToHost,
@@ -81,6 +82,12 @@ export default function Sidebar() {
     node: FileTreeNode;
   } | null>(null);
   const [fsBusy, setFsBusy] = useState(false);
+  const [selectedDirPath, setSelectedDirPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (rootName) setSelectedDirPath((prev) => prev ?? rootName);
+    else setSelectedDirPath(null);
+  }, [rootName]);
 
   useEffect(() => {
     if (createMode) {
@@ -91,14 +98,18 @@ export default function Sidebar() {
 
   if (mode === "vim") return null;
 
-  const beginCreate = (m: CreateMode): void => {
-    if (!rootPath) {
+  const beginCreate = (m: CreateMode, dirStorePath?: string): void => {
+    if (!rootPath || !rootName) {
       setError("Open a folder first.");
       return;
     }
+    const targetDir = dirStorePath ?? selectedDirPath ?? rootName;
+    setSelectedDirPath(targetDir);
+    const rel = storeToRel(targetDir, rootName);
+    const defaultName = m === "file" ? "newfile.ts" : "newfolder";
     setError(null);
     setCreateError(null);
-    setCreateValue(m === "file" ? "newfile.ts" : "newfolder");
+    setCreateValue(rel ? `${rel}/${defaultName}` : defaultName);
     setCreateMode(m);
   };
 
@@ -109,9 +120,12 @@ export default function Sidebar() {
   };
 
   const openContextMenu = (node: FileTreeNode, x: number, y: number): void => {
-    if (!rootName || node.path === rootName) return;
+    if (!rootName) return;
     setMenu({ node, x, y });
   };
+
+  const isRootDir = (node: FileTreeNode): boolean =>
+    node.type === "dir" && node.path === rootName;
 
   const closeContextMenu = (): void => setMenu(null);
 
@@ -140,6 +154,39 @@ export default function Sidebar() {
     try {
       await renamePathOnHost(rootPath, fromRel, toRel);
       renamePath(node.path, newStorePath);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setFsBusy(false);
+    }
+  };
+
+  const handleMovePath = async (
+    srcStorePath: string,
+    targetDirStorePath: string
+  ): Promise<void> => {
+    if (!rootName || !rootPath) return;
+    if (srcStorePath === targetDirStorePath) return;
+    // cannot drop a folder into itself or a descendant
+    if (targetDirStorePath.startsWith(srcStorePath + "/")) {
+      setError("Cannot move a folder into its own descendant.");
+      return;
+    }
+    const base = srcStorePath.slice(srcStorePath.lastIndexOf("/") + 1);
+    const newStorePath = `${targetDirStorePath}/${base}`;
+    if (newStorePath === srcStorePath) return; // same parent
+    if (files[newStorePath]) {
+      setError(`"${base}" already exists in the target folder.`);
+      return;
+    }
+    const fromRel = storeToRel(srcStorePath, rootName);
+    const toRel = storeToRel(newStorePath, rootName);
+    if (!fromRel || !toRel) return;
+    setFsBusy(true);
+    setError(null);
+    try {
+      await renamePathOnHost(rootPath, fromRel, toRel);
+      renamePath(srcStorePath, newStorePath);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -256,6 +303,23 @@ export default function Sidebar() {
     }
   };
 
+  const handleRefresh = async (): Promise<void> => {
+    if (!rootPath || busy) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const listed = await listFolderFromHost(rootPath);
+      const existing = useIdeStore.getState().files;
+      for (const [path, entry] of Object.entries(listed.files)) {
+        if (!existing[path]) addFile(entry);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleOpenTerminal = () => {
     const title = rootName ? `${rootName}` : `Term ${useIdeStore.getState().terminals.length + 1}`;
     addTerminal(title);
@@ -293,6 +357,15 @@ export default function Sidebar() {
             className="text-[11px] px-2 py-0.5 rounded border border-ide-border hover:bg-white/5 disabled:opacity-40"
           >
             +Folder
+          </button>
+          <button
+            data-testid="refresh-folder"
+            onClick={() => void handleRefresh()}
+            disabled={busy || !rootPath}
+            title={rootPath ? "Rescan this folder for new files" : "Open a folder first"}
+            className="text-[11px] px-2 py-0.5 rounded border border-ide-border hover:bg-white/5 disabled:opacity-40"
+          >
+            Refresh
           </button>
           <button
             data-testid="open-folder"
@@ -428,6 +501,9 @@ export default function Sidebar() {
           renamingPath={renamingPath}
           onRenameSubmit={(node, v) => void submitRename(node, v)}
           onRenameCancel={cancelRename}
+          selectedDirPath={selectedDirPath}
+          onSelectDir={setSelectedDirPath}
+          onMove={(src, target) => void handleMovePath(src, target)}
         />
       </div>
 
@@ -437,15 +513,31 @@ export default function Sidebar() {
           y={menu.y}
           onClose={closeContextMenu}
           items={[
-            {
-              label: "Rename",
-              onSelect: () => beginRename(menu.node),
-            },
-            {
-              label: "Delete",
-              danger: true,
-              onSelect: () => setPendingDelete({ node: menu.node }),
-            },
+            ...(menu.node.type === "dir"
+              ? [
+                  {
+                    label: "New File",
+                    onSelect: () => beginCreate("file", menu.node.path),
+                  },
+                  {
+                    label: "New Folder",
+                    onSelect: () => beginCreate("folder", menu.node.path),
+                  },
+                ]
+              : []),
+            ...(isRootDir(menu.node)
+              ? []
+              : [
+                  {
+                    label: "Rename",
+                    onSelect: () => beginRename(menu.node),
+                  },
+                  {
+                    label: "Delete",
+                    danger: true,
+                    onSelect: () => setPendingDelete({ node: menu.node }),
+                  },
+                ]),
           ]}
         />
       )}
