@@ -483,6 +483,216 @@ function attach(middlewares: Connect.Server): void {
     );
   });
 
+  const resolveUnderRoot = (
+    rootPath: string,
+    relPath: string
+  ): { target: string } | { error: string } => {
+    const root = resolve(rootPath);
+    const target = resolve(root, relPath);
+    const withSep = root.endsWith("/") ? root : root + "/";
+    if (target !== root && !target.startsWith(withSep)) {
+      return { error: "path escapes workspace root" };
+    }
+    return { target };
+  };
+
+  middlewares.use("/__readFile", (req, res) => {
+    const url = new URL(req.url ?? "", "http://x");
+    const rootPath = url.searchParams.get("rootPath");
+    const relPath = url.searchParams.get("relPath");
+    if (!rootPath || !relPath) {
+      sendJson(res, 400, { error: "missing rootPath/relPath" });
+      return;
+    }
+    const resolved = resolveUnderRoot(rootPath, relPath);
+    if ("error" in resolved) {
+      sendJson(res, 403, { error: resolved.error });
+      return;
+    }
+    fs.readFile(resolved.target, "utf8").then(
+      (content) => sendJson(res, 200, { content }),
+      (err: NodeJS.ErrnoException) => {
+        if (err.code === "ENOENT") sendJson(res, 404, { error: "not found" });
+        else sendJson(res, 500, { error: err.message });
+      }
+    );
+  });
+
+  middlewares.use("/__statPath", (req, res) => {
+    const url = new URL(req.url ?? "", "http://x");
+    const rootPath = url.searchParams.get("rootPath");
+    const relPath = url.searchParams.get("relPath");
+    if (!rootPath || !relPath) {
+      sendJson(res, 400, { error: "missing rootPath/relPath" });
+      return;
+    }
+    const resolved = resolveUnderRoot(rootPath, relPath);
+    if ("error" in resolved) {
+      sendJson(res, 403, { error: resolved.error });
+      return;
+    }
+    fs.stat(resolved.target).then(
+      (st) =>
+        sendJson(res, 200, {
+          exists: true,
+          isDir: st.isDirectory(),
+          isFile: st.isFile(),
+          mtimeMs: st.mtimeMs,
+          size: st.size,
+        }),
+      (err: NodeJS.ErrnoException) => {
+        if (err.code === "ENOENT") sendJson(res, 200, { exists: false });
+        else sendJson(res, 500, { error: err.message });
+      }
+    );
+  });
+
+  middlewares.use("/__listDir", (req, res) => {
+    const url = new URL(req.url ?? "", "http://x");
+    const rootPath = url.searchParams.get("rootPath");
+    const relPath = url.searchParams.get("relPath");
+    if (!rootPath || !relPath) {
+      sendJson(res, 400, { error: "missing rootPath/relPath" });
+      return;
+    }
+    const resolved = resolveUnderRoot(rootPath, relPath);
+    if ("error" in resolved) {
+      sendJson(res, 403, { error: resolved.error });
+      return;
+    }
+    fs.readdir(resolved.target, { withFileTypes: true }).then(
+      (entries) =>
+        sendJson(res, 200, {
+          entries: entries.map((e) => ({
+            name: e.name,
+            isDir: e.isDirectory(),
+            isFile: e.isFile(),
+          })),
+        }),
+      (err: NodeJS.ErrnoException) => {
+        if (err.code === "ENOENT") sendJson(res, 200, { entries: [] });
+        else sendJson(res, 500, { error: err.message });
+      }
+    );
+  });
+
+  middlewares.use("/__renamePath", (req, res) => {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method not allowed" });
+      return;
+    }
+    readJsonBody<{ rootPath?: string; fromRel?: string; toRel?: string }>(req).then(
+      async (body) => {
+        if (!body.rootPath || !body.fromRel || !body.toRel) {
+          sendJson(res, 400, { error: "missing rootPath/fromRel/toRel" });
+          return;
+        }
+        const src = resolveUnderRoot(body.rootPath, body.fromRel);
+        if ("error" in src) {
+          sendJson(res, 403, { error: src.error });
+          return;
+        }
+        const dst = resolveUnderRoot(body.rootPath, body.toRel);
+        if ("error" in dst) {
+          sendJson(res, 403, { error: dst.error });
+          return;
+        }
+        try {
+          await fs.mkdir(join(dst.target, ".."), { recursive: true });
+          await fs.rename(src.target, dst.target);
+          sendJson(res, 200, { ok: true, from: src.target, to: dst.target });
+        } catch (err) {
+          const e = err as NodeJS.ErrnoException;
+          if (e.code === "ENOENT") sendJson(res, 404, { error: "source not found" });
+          else sendJson(res, 500, { error: e.message });
+        }
+      },
+      (err: Error) => sendJson(res, 400, { error: err.message })
+    );
+  });
+
+  middlewares.use("/__deletePath", (req, res) => {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method not allowed" });
+      return;
+    }
+    readJsonBody<{ rootPath?: string; relPath?: string }>(req).then(
+      (body) => {
+        if (!body.rootPath || !body.relPath) {
+          sendJson(res, 400, { error: "missing rootPath/relPath" });
+          return;
+        }
+        const resolved = resolveUnderRoot(body.rootPath, body.relPath);
+        if ("error" in resolved) {
+          sendJson(res, 403, { error: resolved.error });
+          return;
+        }
+        if (resolved.target === resolve(body.rootPath)) {
+          sendJson(res, 400, { error: "cannot delete workspace root" });
+          return;
+        }
+        fs.rm(resolved.target, { recursive: true, force: true }).then(
+          () => sendJson(res, 200, { ok: true }),
+          (err: Error) => sendJson(res, 500, { error: err.message })
+        );
+      },
+      (err: Error) => sendJson(res, 400, { error: err.message })
+    );
+  });
+
+  middlewares.use("/__createFolder", (req, res) => {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method not allowed" });
+      return;
+    }
+    readJsonBody<{ rootPath?: string; relPath?: string }>(req).then(
+      (body) => {
+        if (!body.rootPath || !body.relPath) {
+          sendJson(res, 400, { error: "missing rootPath/relPath" });
+          return;
+        }
+        const resolved = resolveUnderRoot(body.rootPath, body.relPath);
+        if ("error" in resolved) {
+          sendJson(res, 403, { error: resolved.error });
+          return;
+        }
+        fs.mkdir(resolved.target, { recursive: true }).then(
+          () => sendJson(res, 200, { ok: true, path: resolved.target }),
+          (err: Error) => sendJson(res, 500, { error: err.message })
+        );
+      },
+      (err: Error) => sendJson(res, 400, { error: err.message })
+    );
+  });
+
+  middlewares.use("/__deleteFile", (req, res) => {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method not allowed" });
+      return;
+    }
+    readJsonBody<{ rootPath?: string; relPath?: string }>(req).then(
+      (body) => {
+        if (!body.rootPath || !body.relPath) {
+          sendJson(res, 400, { error: "missing rootPath/relPath" });
+          return;
+        }
+        const resolved = resolveUnderRoot(body.rootPath, body.relPath);
+        if ("error" in resolved) {
+          sendJson(res, 403, { error: resolved.error });
+          return;
+        }
+        fs.unlink(resolved.target).then(
+          () => sendJson(res, 200, { ok: true }),
+          (err: NodeJS.ErrnoException) => {
+            if (err.code === "ENOENT") sendJson(res, 200, { ok: true, missing: true });
+            else sendJson(res, 500, { error: err.message });
+          }
+        );
+      },
+      (err: Error) => sendJson(res, 400, { error: err.message })
+    );
+  });
+
   middlewares.use("/__writeFile", (req, res) => {
     if (req.method !== "POST") {
       sendJson(res, 405, { error: "method not allowed" });

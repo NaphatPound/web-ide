@@ -3,6 +3,7 @@ import Sidebar from "./Sidebar";
 import EditorArea from "./EditorArea";
 import TerminalPanel from "./TerminalPanel";
 import ShortcutBar from "./ShortcutBar";
+import AutoDevPanel from "./AutoDevPanel";
 import Splitter from "./Splitter";
 import { useIdeStore } from "../store/useIdeStore";
 
@@ -105,7 +106,7 @@ export default function Layout() {
       )}
       <div
         className="grid min-h-0 min-w-0"
-        style={{ gridTemplateRows: `1fr 4px ${terminalH}px auto` }}
+        style={{ gridTemplateRows: `1fr 4px ${terminalH}px auto auto` }}
       >
         <EditorArea />
         <Splitter
@@ -116,6 +117,7 @@ export default function Layout() {
         />
         <TerminalPanel />
         <ShortcutBar />
+        <AutoDevPanel />
       </div>
     </div>
   );

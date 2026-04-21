@@ -61,6 +61,126 @@ export async function writeFileToHost(
   }
 }
 
+export async function readFileFromHost(
+  rootPath: string,
+  relPath: string
+): Promise<string | null> {
+  const res = await fetch(
+    `/__readFile?rootPath=${encodeURIComponent(rootPath)}&relPath=${encodeURIComponent(relPath)}`
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+  const body = (await res.json()) as { content: string };
+  return body.content;
+}
+
+export interface PathStat {
+  exists: boolean;
+  isDir?: boolean;
+  isFile?: boolean;
+  mtimeMs?: number;
+  size?: number;
+}
+
+export async function statPathOnHost(
+  rootPath: string,
+  relPath: string
+): Promise<PathStat> {
+  const res = await fetch(
+    `/__statPath?rootPath=${encodeURIComponent(rootPath)}&relPath=${encodeURIComponent(relPath)}`
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+  return (await res.json()) as PathStat;
+}
+
+export interface DirEntry {
+  name: string;
+  isDir: boolean;
+  isFile: boolean;
+}
+
+export async function listDirOnHost(
+  rootPath: string,
+  relPath: string
+): Promise<DirEntry[]> {
+  const res = await fetch(
+    `/__listDir?rootPath=${encodeURIComponent(rootPath)}&relPath=${encodeURIComponent(relPath)}`
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+  const body = (await res.json()) as { entries: DirEntry[] };
+  return body.entries;
+}
+
+export async function renamePathOnHost(
+  rootPath: string,
+  fromRel: string,
+  toRel: string
+): Promise<void> {
+  const res = await fetch("/__renamePath", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ rootPath, fromRel, toRel }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+}
+
+export async function deletePathOnHost(
+  rootPath: string,
+  relPath: string
+): Promise<void> {
+  const res = await fetch("/__deletePath", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ rootPath, relPath }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+}
+
+export async function createFolderOnHost(
+  rootPath: string,
+  relPath: string
+): Promise<void> {
+  const res = await fetch("/__createFolder", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ rootPath, relPath }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+}
+
+export async function deleteFileFromHost(
+  rootPath: string,
+  relPath: string
+): Promise<void> {
+  const res = await fetch("/__deleteFile", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ rootPath, relPath }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+}
+
 export async function runExec(
   cwd: string | null,
   cmd: string,

@@ -38,7 +38,7 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   sql: "sql",
 };
 
-function languageFor(path: string): string {
+export function languageFor(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   return LANGUAGE_BY_EXT[ext] ?? "plaintext";
 }

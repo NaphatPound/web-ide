@@ -127,6 +127,69 @@ describe("useIdeStore", () => {
     expect(useIdeStore.getState().files["README.md"].dirty).toBe(false);
   });
 
+  it("renamePath renames a single file and updates activeFile/openFiles", () => {
+    useIdeStore.getState().openFile("README.md");
+    useIdeStore.getState().renamePath("README.md", "README.rst");
+    const s = useIdeStore.getState();
+    expect(s.files["README.md"]).toBeUndefined();
+    expect(s.files["README.rst"]).toMatchObject({ path: "README.rst" });
+    expect(s.activeFile).toBe("README.rst");
+    expect(s.openFiles).toContain("README.rst");
+  });
+
+  it("renamePath rewrites every descendant when a folder is renamed", () => {
+    useIdeStore.setState({
+      files: {
+        "proj/src/a.ts": { path: "proj/src/a.ts", language: "typescript", content: "a" },
+        "proj/src/sub/b.ts": { path: "proj/src/sub/b.ts", language: "typescript", content: "b" },
+        "proj/other.ts": { path: "proj/other.ts", language: "typescript", content: "x" },
+      },
+      activeFile: "proj/src/sub/b.ts",
+      openFiles: ["proj/src/a.ts", "proj/src/sub/b.ts"],
+    });
+    useIdeStore.getState().renamePath("proj/src", "proj/lib");
+    const s = useIdeStore.getState();
+    expect(Object.keys(s.files).sort()).toEqual([
+      "proj/lib/a.ts",
+      "proj/lib/sub/b.ts",
+      "proj/other.ts",
+    ]);
+    expect(s.activeFile).toBe("proj/lib/sub/b.ts");
+    expect(s.openFiles).toEqual(["proj/lib/a.ts", "proj/lib/sub/b.ts"]);
+  });
+
+  it("renamePath is a no-op when old equals new", () => {
+    const before = useIdeStore.getState().files;
+    useIdeStore.getState().renamePath("README.md", "README.md");
+    expect(useIdeStore.getState().files).toBe(before);
+  });
+
+  it("removePath deletes a single file and closes its tab", () => {
+    useIdeStore.getState().openFile("README.md");
+    useIdeStore.getState().removePath("README.md");
+    const s = useIdeStore.getState();
+    expect(s.files["README.md"]).toBeUndefined();
+    expect(s.openFiles).not.toContain("README.md");
+    expect(s.activeFile).toBe("src/index.tsx");
+  });
+
+  it("removePath drops every descendant when a folder is deleted", () => {
+    useIdeStore.setState({
+      files: {
+        "proj/src/a.ts": { path: "proj/src/a.ts", language: "typescript", content: "a" },
+        "proj/src/sub/b.ts": { path: "proj/src/sub/b.ts", language: "typescript", content: "b" },
+        "proj/keep.ts": { path: "proj/keep.ts", language: "typescript", content: "x" },
+      },
+      activeFile: "proj/src/sub/b.ts",
+      openFiles: ["proj/src/a.ts", "proj/src/sub/b.ts", "proj/keep.ts"],
+    });
+    useIdeStore.getState().removePath("proj/src");
+    const s = useIdeStore.getState();
+    expect(Object.keys(s.files)).toEqual(["proj/keep.ts"]);
+    expect(s.openFiles).toEqual(["proj/keep.ts"]);
+    expect(s.activeFile).toBe("proj/keep.ts");
+  });
+
   it("loadFolder resets openFiles to just the first file", () => {
     useIdeStore.getState().loadFolder("proj", {
       "proj/a": { path: "proj/a", language: "plaintext", content: "" },

@@ -29,6 +29,61 @@ export interface ShortcutEntry {
 }
 
 const SHORTCUTS_STORAGE_KEY = "web-ide:shortcuts";
+const AUTODEV_MAX_ITER_KEY = "web-ide:autoDevMaxIter";
+const DEFAULT_AUTODEV_MAX_ITER = 3;
+
+function loadAutoDevMaxIter(): number {
+  if (typeof window === "undefined") return DEFAULT_AUTODEV_MAX_ITER;
+  try {
+    const raw = window.localStorage?.getItem(AUTODEV_MAX_ITER_KEY);
+    const n = raw ? parseInt(raw, 10) : NaN;
+    if (!Number.isFinite(n) || n < 1) return DEFAULT_AUTODEV_MAX_ITER;
+    return Math.min(20, Math.max(1, n));
+  } catch {
+    return DEFAULT_AUTODEV_MAX_ITER;
+  }
+}
+
+function saveAutoDevMaxIter(n: number): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage?.setItem(AUTODEV_MAX_ITER_KEY, String(n));
+  } catch {
+    // ignore
+  }
+}
+
+export type AutoDevPhase =
+  | "idle"
+  | "sa"
+  | "dev"
+  | "qa"
+  | "dev_fix"
+  | "done"
+  | "stopped_max"
+  | "error";
+
+export interface AutoDevLogEntry {
+  ts: number;
+  level: "info" | "warn" | "error";
+  message: string;
+}
+
+export interface AutoDevRoleIds {
+  sa: string | null;
+  dev: string | null;
+  qa: string | null;
+}
+
+export interface AutoDevState {
+  running: boolean;
+  phase: AutoDevPhase;
+  iter: number;
+  maxIter: number;
+  roleIds: AutoDevRoleIds;
+  log: AutoDevLogEntry[];
+  error: string | null;
+}
 
 const DEFAULT_SHORTCUTS: ShortcutEntry[] = [
   { id: "s-ls", name: "ls", command: "ls -la", type: "command" },
@@ -101,6 +156,7 @@ interface IdeState {
   preferredLayout: TerminalLayout;
   layoutVersion: number;
   shortcuts: ShortcutEntry[];
+  autoDev: AutoDevState;
   setMode: (mode: Mode) => void;
   toggleMode: () => void;
   addFile: (file: FileEntry) => void;
@@ -113,6 +169,8 @@ interface IdeState {
     files: Record<string, FileEntry>,
     rootPath?: string | null
   ) => void;
+  renamePath: (oldPath: string, newPath: string) => void;
+  removePath: (path: string) => void;
   addTerminal: (title: string, initialCmd?: string) => string;
   removeTerminal: (id: string) => void;
   setActiveTerminalId: (id: string | null) => void;
@@ -123,6 +181,10 @@ interface IdeState {
     updates: Partial<Omit<ShortcutEntry, "id">>
   ) => void;
   removeShortcut: (id: string) => void;
+  setAutoDevMaxIter: (n: number) => void;
+  setAutoDev: (patch: Partial<AutoDevState>) => void;
+  pushAutoDevLog: (level: AutoDevLogEntry["level"], message: string) => void;
+  resetAutoDevLog: () => void;
 }
 
 const seedFiles: Record<string, FileEntry> = {
@@ -152,6 +214,15 @@ export const useIdeStore = create<IdeState>((set, get) => ({
   preferredLayout: "tabs",
   layoutVersion: 0,
   shortcuts: loadShortcuts(),
+  autoDev: {
+    running: false,
+    phase: "idle",
+    iter: 0,
+    maxIter: loadAutoDevMaxIter(),
+    roleIds: { sa: null, dev: null, qa: null },
+    log: [],
+    error: null,
+  },
 
   setMode: (mode) => set({ mode }),
   toggleMode: () =>
@@ -197,6 +268,54 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       return {
         files: { ...s.files, [path]: { ...existing, dirty: false } },
       };
+    }),
+
+  renamePath: (oldPath, newPath) =>
+    set((s) => {
+      if (oldPath === newPath) return s;
+      const files = { ...s.files };
+      let touched = false;
+      const remap = (p: string): string => {
+        if (p === oldPath) return newPath;
+        if (p.startsWith(oldPath + "/")) return newPath + p.slice(oldPath.length);
+        return p;
+      };
+      for (const key of Object.keys(s.files)) {
+        const next = remap(key);
+        if (next !== key) {
+          files[next] = { ...s.files[key], path: next };
+          delete files[key];
+          touched = true;
+        }
+      }
+      if (!touched) return s;
+      return {
+        files,
+        activeFile: s.activeFile ? remap(s.activeFile) : s.activeFile,
+        openFiles: s.openFiles.map(remap),
+      };
+    }),
+
+  removePath: (path) =>
+    set((s) => {
+      const matches = (p: string): boolean =>
+        p === path || p.startsWith(path + "/");
+      const files = { ...s.files };
+      let touched = false;
+      for (const key of Object.keys(s.files)) {
+        if (matches(key)) {
+          delete files[key];
+          touched = true;
+        }
+      }
+      if (!touched) return s;
+      const openFiles = s.openFiles.filter((p) => !matches(p));
+      let activeFile = s.activeFile;
+      if (activeFile && matches(activeFile)) {
+        const idx = s.openFiles.indexOf(activeFile);
+        activeFile = openFiles[Math.min(idx, openFiles.length - 1)] ?? null;
+      }
+      return { files, openFiles, activeFile };
     }),
 
   loadFolder: (rootName, files, rootPath = null) => {
@@ -273,4 +392,24 @@ export const useIdeStore = create<IdeState>((set, get) => ({
       saveShortcuts(shortcuts);
       return { shortcuts };
     }),
+
+  setAutoDevMaxIter: (n) =>
+    set((s) => {
+      const clamped = Math.min(20, Math.max(1, Math.floor(n)));
+      saveAutoDevMaxIter(clamped);
+      return { autoDev: { ...s.autoDev, maxIter: clamped } };
+    }),
+
+  setAutoDev: (patch) =>
+    set((s) => ({ autoDev: { ...s.autoDev, ...patch } })),
+
+  pushAutoDevLog: (level, message) =>
+    set((s) => {
+      const entry: AutoDevLogEntry = { ts: Date.now(), level, message };
+      const log = [...s.autoDev.log, entry].slice(-500);
+      return { autoDev: { ...s.autoDev, log } };
+    }),
+
+  resetAutoDevLog: () =>
+    set((s) => ({ autoDev: { ...s.autoDev, log: [] } })),
 }));

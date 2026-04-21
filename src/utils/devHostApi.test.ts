@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import {
+  createFolderOnHost,
+  deletePathOnHost,
+  renamePathOnHost,
   runExec,
   sendExecInput,
   sendExecResize,
@@ -215,5 +218,84 @@ describe("writeFileToHost", () => {
       new Response('{"error":"path escapes workspace root"}', { status: 403 })
     );
     await expect(writeFileToHost("/a", "b", "x")).rejects.toThrow(/escapes/);
+  });
+});
+
+describe("renamePathOnHost", () => {
+  it("POSTs rootPath/fromRel/toRel and resolves on 200", async () => {
+    const spy = vi
+      .spyOn(global, "fetch")
+      .mockResolvedValue(new Response('{"ok":true}', { status: 200 }));
+    await renamePathOnHost("/Users/me/proj", "src/foo.ts", "src/bar.ts");
+    expect(spy).toHaveBeenCalledWith(
+      "/__renamePath",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          rootPath: "/Users/me/proj",
+          fromRel: "src/foo.ts",
+          toRel: "src/bar.ts",
+        }),
+      })
+    );
+  });
+
+  it("throws on 404 source not found", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response('{"error":"source not found"}', { status: 404 })
+    );
+    await expect(renamePathOnHost("/a", "x", "y")).rejects.toThrow(/not found/);
+  });
+});
+
+describe("deletePathOnHost", () => {
+  it("POSTs rootPath/relPath and resolves on 200", async () => {
+    const spy = vi
+      .spyOn(global, "fetch")
+      .mockResolvedValue(new Response('{"ok":true}', { status: 200 }));
+    await deletePathOnHost("/Users/me/proj", "src/old-folder");
+    expect(spy).toHaveBeenCalledWith(
+      "/__deletePath",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          rootPath: "/Users/me/proj",
+          relPath: "src/old-folder",
+        }),
+      })
+    );
+  });
+
+  it("throws when the server forbids deleting the root", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response('{"error":"cannot delete workspace root"}', { status: 400 })
+    );
+    await expect(deletePathOnHost("/a", "")).rejects.toThrow(/workspace root/);
+  });
+});
+
+describe("createFolderOnHost", () => {
+  it("POSTs rootPath/relPath and resolves on 200", async () => {
+    const spy = vi
+      .spyOn(global, "fetch")
+      .mockResolvedValue(new Response('{"ok":true}', { status: 200 }));
+    await createFolderOnHost("/Users/me/proj", "docs/guides");
+    expect(spy).toHaveBeenCalledWith(
+      "/__createFolder",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          rootPath: "/Users/me/proj",
+          relPath: "docs/guides",
+        }),
+      })
+    );
+  });
+
+  it("throws a descriptive error on non-2xx", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response('{"error":"path escapes workspace root"}', { status: 403 })
+    );
+    await expect(createFolderOnHost("/a", "../../evil")).rejects.toThrow(/escapes/);
   });
 });

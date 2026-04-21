@@ -5,6 +5,10 @@ interface Props {
   files: Record<string, unknown>;
   activePath: string | null;
   onOpen: (path: string) => void;
+  onContextMenu?: (node: FileTreeNode, x: number, y: number) => void;
+  renamingPath?: string | null;
+  onRenameSubmit?: (node: FileTreeNode, newName: string) => void;
+  onRenameCancel?: () => void;
 }
 
 function fileIcon(name: string): string {
@@ -46,17 +50,74 @@ interface RowProps {
   expanded: Set<string>;
   toggle: (path: string) => void;
   onOpen: (path: string) => void;
+  onContextMenu?: (node: FileTreeNode, x: number, y: number) => void;
+  renamingPath?: string | null;
+  onRenameSubmit?: (node: FileTreeNode, newName: string) => void;
+  onRenameCancel?: () => void;
 }
 
-function Row({ node, depth, activePath, expanded, toggle, onOpen }: RowProps) {
+function RenameInput({
+  initial,
+  onSubmit,
+  onCancel,
+}: {
+  initial: string;
+  onSubmit: (v: string) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <input
+      data-testid="rename-input"
+      autoFocus
+      defaultValue={initial}
+      onFocus={(e) => {
+        const dot = initial.lastIndexOf(".");
+        if (dot > 0) e.currentTarget.setSelectionRange(0, dot);
+        else e.currentTarget.select();
+      }}
+      onBlur={onCancel}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onSubmit((e.currentTarget as HTMLInputElement).value);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+      onClick={(e) => e.stopPropagation()}
+      className="flex-1 bg-ide-bg border border-ide-accent rounded px-1 py-0 text-[12px] text-ide-text focus:outline-none"
+    />
+  );
+}
+
+function Row({
+  node,
+  depth,
+  activePath,
+  expanded,
+  toggle,
+  onOpen,
+  onContextMenu,
+  renamingPath,
+  onRenameSubmit,
+  onRenameCancel,
+}: RowProps) {
   const indent = 6 + depth * 12;
+  const renaming = renamingPath === node.path;
+
   if (node.type === "file") {
     const active = activePath === node.path;
     return (
-      <button
-        onClick={() => onOpen(node.path)}
+      <div
+        onClick={() => !renaming && onOpen(node.path)}
+        onContextMenu={(e) => {
+          if (!onContextMenu) return;
+          e.preventDefault();
+          onContextMenu(node, e.clientX, e.clientY);
+        }}
         title={node.path}
-        className={`group w-full text-left flex items-center gap-1.5 pr-2 py-[3px] text-[13px] leading-snug transition-colors ${
+        className={`group w-full text-left flex items-center gap-1.5 pr-2 py-[3px] text-[13px] leading-snug transition-colors cursor-pointer ${
           active
             ? "bg-ide-accent/25 text-white"
             : "text-ide-text/85 hover:bg-white/5"
@@ -70,17 +131,30 @@ function Row({ node, depth, activePath, expanded, toggle, onOpen }: RowProps) {
         >
           {fileIcon(node.name)}
         </span>
-        <span className="truncate">{node.name}</span>
-      </button>
+        {renaming && onRenameSubmit && onRenameCancel ? (
+          <RenameInput
+            initial={node.name}
+            onSubmit={(v) => onRenameSubmit(node, v)}
+            onCancel={onRenameCancel}
+          />
+        ) : (
+          <span className="truncate">{node.name}</span>
+        )}
+      </div>
     );
   }
   const isOpen = expanded.has(node.path);
   return (
     <>
-      <button
-        onClick={() => toggle(node.path)}
+      <div
+        onClick={() => !renaming && toggle(node.path)}
+        onContextMenu={(e) => {
+          if (!onContextMenu) return;
+          e.preventDefault();
+          onContextMenu(node, e.clientX, e.clientY);
+        }}
         title={node.path}
-        className="w-full text-left flex items-center gap-1.5 pr-2 py-[3px] text-[13px] leading-snug text-ide-text hover:bg-white/5"
+        className="w-full text-left flex items-center gap-1.5 pr-2 py-[3px] text-[13px] leading-snug text-ide-text hover:bg-white/5 cursor-pointer"
         style={{ paddingLeft: `${indent}px` }}
       >
         <span
@@ -93,8 +167,16 @@ function Row({ node, depth, activePath, expanded, toggle, onOpen }: RowProps) {
         <span className="text-[11px] w-4 text-center text-amber-300/90" aria-hidden>
           {isOpen ? "▾" : "▸"}
         </span>
-        <span className="truncate font-medium">{node.name}</span>
-      </button>
+        {renaming && onRenameSubmit && onRenameCancel ? (
+          <RenameInput
+            initial={node.name}
+            onSubmit={(v) => onRenameSubmit(node, v)}
+            onCancel={onRenameCancel}
+          />
+        ) : (
+          <span className="truncate font-medium">{node.name}</span>
+        )}
+      </div>
       {isOpen &&
         node.children.map((c) => (
           <Row
@@ -105,13 +187,25 @@ function Row({ node, depth, activePath, expanded, toggle, onOpen }: RowProps) {
             expanded={expanded}
             toggle={toggle}
             onOpen={onOpen}
+            onContextMenu={onContextMenu}
+            renamingPath={renamingPath}
+            onRenameSubmit={onRenameSubmit}
+            onRenameCancel={onRenameCancel}
           />
         ))}
     </>
   );
 }
 
-export default function FileTree({ files, activePath, onOpen }: Props) {
+export default function FileTree({
+  files,
+  activePath,
+  onOpen,
+  onContextMenu,
+  renamingPath,
+  onRenameSubmit,
+  onRenameCancel,
+}: Props) {
   const paths = useMemo(() => Object.keys(files), [files]);
   const tree = useMemo(() => buildFileTree(paths), [paths]);
 
@@ -162,6 +256,10 @@ export default function FileTree({ files, activePath, onOpen }: Props) {
           expanded={expanded}
           toggle={toggle}
           onOpen={onOpen}
+          onContextMenu={onContextMenu}
+          renamingPath={renamingPath}
+          onRenameSubmit={onRenameSubmit}
+          onRenameCancel={onRenameCancel}
         />
       ))}
     </div>
