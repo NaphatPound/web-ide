@@ -313,34 +313,62 @@ describe("Sidebar create under selected folder + drag/drop", () => {
     });
   });
 
-  it("+File prefills the input under the currently-selected folder", () => {
+  it("+File under the selected folder shows the folder on the label, filename in input", () => {
     render(<Sidebar />);
-    // click the src folder to select it
     fireEvent.click(screen.getByTitle("proj/src"));
     fireEvent.click(screen.getByTestId("new-file"));
     expect((screen.getByTestId("create-input") as HTMLInputElement).value).toBe(
-      "src/newfile.ts"
+      "newfile.ts"
     );
+    expect(screen.getByTestId("create-target")).toHaveTextContent("proj/src/");
   });
 
-  it("right-click folder → New File prefills under that folder", () => {
+  it("submitting after selecting a subfolder POSTs the file under that subfolder", async () => {
+    const fetchSpy = vi
+      .spyOn(global, "fetch")
+      .mockResolvedValue(new Response('{"ok":true}', { status: 200 }));
     render(<Sidebar />);
-    fireEvent.click(screen.getByTitle("proj/src")); // expand src
+    fireEvent.click(screen.getByTitle("proj/src"));
+    fireEvent.click(screen.getByTestId("new-file"));
+    const input = screen.getByTestId("create-input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "helpers.ts" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.relPath).toBe("src/helpers.ts");
+    await waitFor(() => {
+      expect(useIdeStore.getState().files["proj/src/helpers.ts"]).toBeDefined();
+    });
+  });
+
+  it("right-click folder → New File targets that folder regardless of prior selection", async () => {
+    const fetchSpy = vi
+      .spyOn(global, "fetch")
+      .mockResolvedValue(new Response('{"ok":true}', { status: 200 }));
+    render(<Sidebar />);
+    fireEvent.click(screen.getByTitle("proj/src"));
     fireEvent.contextMenu(screen.getByTitle("proj/src/nested"), { clientX: 1, clientY: 1 });
     fireEvent.click(screen.getByTestId("context-menu-new file"));
-    expect((screen.getByTestId("create-input") as HTMLInputElement).value).toBe(
-      "src/nested/newfile.ts"
-    );
+    expect(screen.getByTestId("create-target")).toHaveTextContent("proj/src/nested/");
+    const input = screen.getByTestId("create-input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "deep.ts" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      const body = JSON.parse(
+        (fetchSpy.mock.calls[0][1] as RequestInit).body as string
+      );
+      expect(body.relPath).toBe("src/nested/deep.ts");
+    });
   });
 
   it("clicking a file selects its parent folder (so +File lands next to it)", () => {
     render(<Sidebar />);
-    fireEvent.click(screen.getByTitle("proj/src")); // expand src
+    fireEvent.click(screen.getByTitle("proj/src"));
     fireEvent.click(screen.getByTitle("proj/src/a.ts"));
     fireEvent.click(screen.getByTestId("new-file"));
-    expect((screen.getByTestId("create-input") as HTMLInputElement).value).toBe(
-      "src/newfile.ts"
-    );
+    expect(screen.getByTestId("create-target")).toHaveTextContent("proj/src/");
   });
 
   it("drag a file and drop it on another folder calls /__renamePath with the new path", async () => {

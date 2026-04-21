@@ -66,7 +66,10 @@ export default function Sidebar() {
   } = useIdeStore();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [createMode, setCreateMode] = useState<CreateMode | null>(null);
+  const [createState, setCreateState] = useState<{
+    mode: CreateMode;
+    dirStorePath: string;
+  } | null>(null);
   const [createValue, setCreateValue] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -90,11 +93,15 @@ export default function Sidebar() {
   }, [rootName]);
 
   useEffect(() => {
-    if (createMode) {
-      createInputRef.current?.focus();
-      createInputRef.current?.select();
+    if (createState) {
+      const input = createInputRef.current;
+      if (!input) return;
+      input.focus();
+      const dot = input.value.lastIndexOf(".");
+      if (dot > 0) input.setSelectionRange(0, dot);
+      else input.select();
     }
-  }, [createMode]);
+  }, [createState]);
 
   if (mode === "vim") return null;
 
@@ -105,16 +112,15 @@ export default function Sidebar() {
     }
     const targetDir = dirStorePath ?? selectedDirPath ?? rootName;
     setSelectedDirPath(targetDir);
-    const rel = storeToRel(targetDir, rootName);
     const defaultName = m === "file" ? "newfile.ts" : "newfolder";
     setError(null);
     setCreateError(null);
-    setCreateValue(rel ? `${rel}/${defaultName}` : defaultName);
-    setCreateMode(m);
+    setCreateValue(defaultName);
+    setCreateState({ mode: m, dirStorePath: targetDir });
   };
 
   const cancelCreate = (): void => {
-    setCreateMode(null);
+    setCreateState(null);
     setCreateValue("");
     setCreateError(null);
   };
@@ -215,14 +221,17 @@ export default function Sidebar() {
   };
 
   const submitCreate = async (): Promise<void> => {
-    if (!createMode || !rootPath || !rootName || creating) return;
-    const rel = normalizeCreatePath(createValue);
-    if (!rel) {
-      setCreateError("Invalid path.");
+    if (!createState || !rootPath || !rootName || creating) return;
+    const { mode, dirStorePath } = createState;
+    const nameRel = normalizeCreatePath(createValue);
+    if (!nameRel) {
+      setCreateError("Invalid name.");
       return;
     }
+    const dirRel = storeToRel(dirStorePath, rootName);
+    const rel = dirRel ? `${dirRel}/${nameRel}` : nameRel;
     const storeFilePath =
-      createMode === "file" ? `${rootName}/${rel}` : `${rootName}/${rel}/.gitkeep`;
+      mode === "file" ? `${rootName}/${rel}` : `${rootName}/${rel}/.gitkeep`;
     if (files[storeFilePath]) {
       setCreateError("Path already exists.");
       return;
@@ -230,7 +239,7 @@ export default function Sidebar() {
     setCreating(true);
     setCreateError(null);
     try {
-      if (createMode === "file") {
+      if (mode === "file") {
         await writeFileToHost(rootPath, rel, "");
         addFile({
           path: storeFilePath,
@@ -394,14 +403,18 @@ export default function Sidebar() {
         </div>
       </div>
 
-      {createMode && (
+      {createState && rootName && (
         <div
           data-testid="create-input-row"
           className="px-2 py-1 border-y border-ide-border bg-black/20"
         >
-          <label className="text-[10px] text-ide-text/60 uppercase tracking-wider">
-            New {createMode}
-          </label>
+          <div
+            data-testid="create-target"
+            className="text-[10px] text-ide-text/60 uppercase tracking-wider truncate"
+            title={createState.dirStorePath}
+          >
+            New {createState.mode} in {createState.dirStorePath}/
+          </div>
           <input
             ref={createInputRef}
             data-testid="create-input"
@@ -421,7 +434,7 @@ export default function Sidebar() {
             }}
             disabled={creating}
             placeholder={
-              createMode === "file" ? "src/hooks/useFoo.ts" : "docs/guides"
+              createState.mode === "file" ? "useFoo.ts" : "guides"
             }
             className="w-full mt-0.5 bg-ide-bg border border-ide-border rounded px-1.5 py-0.5 text-[12px] text-ide-text focus:outline-none focus:border-ide-accent disabled:opacity-50"
           />
